@@ -46,6 +46,24 @@ jobs:
           git submodule foreach --recursive 'git lfs pull'
       - name: Install Boost
         run: brew list boost >/dev/null 2>&1 || brew install boost
+      - name: Trust the pinned R.swift resource generator
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          lock = pathlib.Path('ManicEmu/ManicEmu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved')
+          pin = next(p for p in json.loads(lock.read_text())['pins'] if p['identity'] == 'r.swift')
+          revision = 'a9abc6b0afe0fc4a5a71e1d7d2872143dff2d2f1'
+          assert pin['state']['revision'] == revision
+          assert pin['location'].removesuffix('.git') == 'https://github.com/mac-cain13/R.swift'
+          entry = {'fingerprint': revision, 'packageIdentity': 'r.swift', 'targetName': 'RswiftGenerateInternalResources'}
+          for folder in ['Library/org.swift.swiftpm/security', '.swiftpm/security']:
+              path = pathlib.Path.home() / folder / 'plugins.json'
+              path.parent.mkdir(parents=True, exist_ok=True)
+              entries = json.loads(path.read_text()) if path.exists() else []
+              if entry not in entries:
+                  entries.append(entry)
+              path.write_text(json.dumps(entries))
+          PY
       - name: Archive unsigned iOS app
         run: |
           set -o pipefail
