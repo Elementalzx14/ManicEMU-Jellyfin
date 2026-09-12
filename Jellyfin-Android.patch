@@ -1,0 +1,494 @@
+diff --git a/lemuroid-app/build.gradle.kts b/lemuroid-app/build.gradle.kts
+index 741cef4..4067bf9 100644
+--- a/lemuroid-app/build.gradle.kts
++++ b/lemuroid-app/build.gradle.kts
+@@ -12,7 +12,7 @@ android {
+     defaultConfig {
+         versionCode = 252
+         versionName = "1.17.0" // Always remember to update Cores Tag!
+-        applicationId = "com.swordfish.lemuroid"
++        applicationId = "com.elementalzx14.jellyfingames"
+     }
+     flavorDimensions += listOf("opensource", "cores")
+ 
+@@ -101,7 +101,7 @@ android {
+         getByName("debug") {
+             applicationIdSuffix = ".debug"
+             versionNameSuffix = "-DEBUG"
+-            resValue("string", "lemuroid_name", "LemuroiDebug")
++            resValue("string", "lemuroid_name", "Jellyfin Games")
+         }
+     }
+ 
+@@ -125,6 +125,8 @@ android {
+ }
+ 
+ dependencies {
++    testImplementation("junit:junit:4.13.2")
++    testImplementation("org.json:json:20240303")
+     implementation(project(":retrograde-util"))
+     implementation(project(":retrograde-app-shared"))
+     implementation(project(":lemuroid-metadata-libretro-db"))
+diff --git a/lemuroid-app/src/main/AndroidManifest.xml b/lemuroid-app/src/main/AndroidManifest.xml
+index ed9b150..1f6d6e6 100644
+--- a/lemuroid-app/src/main/AndroidManifest.xml
++++ b/lemuroid-app/src/main/AndroidManifest.xml
+@@ -39,7 +39,8 @@
+         android:supportsRtl="true"
+         android:theme="@style/LemuroidMaterialTheme">
+         <activity
+-            android:name="com.swordfish.lemuroid.app.mobile.feature.main.MainActivity"
++            android:name="com.swordfish.lemuroid.app.jellyfin.JellyfinActivity"
++            android:configChanges="orientation|screenSize|keyboardHidden"
+             android:exported="true">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+@@ -47,6 +48,7 @@
+             </intent-filter>
+         </activity>
+ 
++        <activity android:name="com.swordfish.lemuroid.app.mobile.feature.main.MainActivity" android:exported="false" />
+         <activity
+             android:name="com.swordfish.lemuroid.app.shared.game.ExternalGameLauncherActivity"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|layoutDirection|locale|mcc|navigation|smallestScreenSize|touchscreen|uiMode"
+diff --git a/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java
+new file mode 100644
+index 0000000..289d3c0
+--- /dev/null
++++ b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java
+@@ -0,0 +1,211 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.swordfish.lemuroid.app.jellyfin;
++
++import android.app.*;
++import android.os.Bundle;
++import android.content.Intent;
++import android.graphics.Bitmap;
++import android.graphics.BitmapFactory;
++import android.graphics.Color;
++import android.net.Uri;
++import android.security.keystore.KeyGenParameterSpec;
++import android.security.keystore.KeyProperties;
++import android.text.InputType;
++import android.util.Base64;
++import android.util.LruCache;
++import android.view.*;
++import android.widget.*;
++import org.json.*;
++import java.io.*;
++import java.net.HttpURLConnection;
++import java.security.KeyStore;
++import java.security.MessageDigest;
++import java.util.*;
++import java.util.concurrent.*;
++import javax.crypto.*;
++import javax.crypto.spec.GCMParameterSpec;
++import com.swordfish.lemuroid.app.mobile.feature.main.MainActivity;
++import com.swordfish.lemuroid.app.shared.library.LibraryIndexScheduler;
++
++public final class JellyfinActivity extends Activity {
++    private final ExecutorService worker = Executors.newSingleThreadExecutor();
++    private final ExecutorService images = Executors.newFixedThreadPool(3);
++    private final List<JSONObject> folders = new ArrayList<>(), rows = new ArrayList<>();
++    private final LruCache<String, Bitmap> covers = new LruCache<String, Bitmap>(12 * 1024 * 1024) {
++        protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
++    };
++    private final Set<JellyfinApi> imageCalls = Collections.synchronizedSet(new HashSet<>());
++    private JSONObject account;
++    private JellyfinApi operation;
++    private int generation, offset;
++    private boolean busy, more, downloading;
++    private TextView heading, message;
++    private EditText search;
++    private ListView list;
++    private BaseAdapter adapter;
++    private Button back, libraries, sign, loadMore;
++    private LinearLayout searchRow;
++
++    @Override public void onCreate(Bundle state) {
++        super.onCreate(state);
++        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(20, 12, 20, 12);
++        root.setBackgroundColor(Color.rgb(18, 22, 31));
++        heading = text("Jellyfin Games", 24); root.addView(heading);
++        LinearLayout nav = new LinearLayout(this);
++        back = button("Back", nav, v -> up()); libraries = button("Libraries", nav, v -> { if (!downloading) { folders.clear(); search.setText(""); load(false); } });
++        sign = button("Sign in", nav, v -> { if (!downloading) { if (account == null) login(); else logout(); } }); root.addView(nav);
++        Button local = new Button(this); local.setText("Downloaded games • Play"); local.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class))); root.addView(local);
++        searchRow = new LinearLayout(this);
++        search = new EditText(this); search.setSingleLine(true); search.setTextColor(Color.WHITE); search.setHintTextColor(Color.LTGRAY); search.setHint("Search this folder");
++        searchRow.addView(search, new LinearLayout.LayoutParams(0, -2, 1)); button("Search", searchRow, v -> { if (!downloading) load(false); }); root.addView(searchRow);
++        message = text("", 15); root.addView(message);
++        list = new ListView(this); list.setDividerHeight(1); root.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
++        loadMore = new Button(this); loadMore.setText("Load more"); loadMore.setOnClickListener(v -> { if (!busy) load(true); }); root.addView(loadMore);
++        TextView credit = text("Built on Lemuroid • GPLv3 • About & source", 12);
++        credit.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Jellyfin Games for Android")
++            .setMessage("An unofficial Jellyfin integration built on Lemuroid and LibretroDroid. Original authors and licenses are retained. Console support follows Lemuroid, not ManicEMU. No games or BIOS files are included. Downloads play locally; saves are not synchronized with Jellyfin.")
++            .setPositiveButton("Source code", (d,w) -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Elementalzx14/ManicEMU-Jellyfin"))))
++            .setNegativeButton("Close", null).show()); root.addView(credit);
++        setContentView(root);
++        adapter = new BaseAdapter() {
++            public int getCount() { return rows.size(); }
++            public Object getItem(int p) { return rows.get(p); }
++            public long getItemId(int p) { return p; }
++            public View getView(int p, View old, ViewGroup parent) {
++                JSONObject item = rows.get(p); boolean folder = folders.isEmpty() || item.optBoolean("IsFolder");
++                LinearLayout row = new LinearLayout(JellyfinActivity.this); row.setPadding(8, 12, 8, 12); row.setGravity(Gravity.CENTER_VERTICAL);
++                ImageView image = new ImageView(JellyfinActivity.this); image.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(image, new LinearLayout.LayoutParams(60, 76));
++                image.setImageResource(folder ? android.R.drawable.ic_menu_agenda : android.R.drawable.ic_media_play);
++                LinearLayout labels = new LinearLayout(JellyfinActivity.this); labels.setOrientation(LinearLayout.VERTICAL); labels.setPadding(16,0,0,0);
++                labels.addView(text(item.optString("Name"), 18)); labels.addView(text(folder ? "Open folder ›" : JellyfinApi.filename(item), 12));
++                row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1)); cover(item, image); return row;
++            }
++        };
++        list.setAdapter(adapter); list.setOnItemClickListener((a,v,p,id) -> {
++            if (busy) return;
++            JSONObject item = rows.get(p);
++            if (folders.isEmpty() || item.optBoolean("IsFolder")) { folders.add(item); search.setText(""); load(false); }
++            else confirmDownload(item);
++        });
++        try { account = readAccount(); } catch (Exception e) { message.setText("Saved sign-in could not be opened. Please sign in again."); }
++        if (account != null) load(false); else { update(); message.setText("Sign in to browse your console folders and games."); }
++    }
++    private TextView text(String value, int size) { TextView t = new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(Color.WHITE); t.setPadding(4,6,4,6); return t; }
++    private Button button(String title, LinearLayout row, View.OnClickListener click) { Button b = new Button(this); b.setText(title); b.setOnClickListener(click); row.addView(b, new LinearLayout.LayoutParams(0,-2,1)); return b; }
++    private JellyfinApi api() { return new JellyfinApi(account.optString("server"), account.optString("user"), account.optString("token"), account.optString("device")); }
++    private void update() {
++        sign.setText(account == null ? "Sign in" : "Sign out"); sign.setEnabled(!busy);
++        back.setEnabled(!downloading && !folders.isEmpty()); libraries.setEnabled(!downloading && account != null);
++        searchRow.setVisibility(folders.isEmpty() ? View.GONE : View.VISIBLE); search.setEnabled(!busy);
++        loadMore.setVisibility(more ? View.VISIBLE : View.GONE); loadMore.setEnabled(!busy);
++        heading.setText(folders.isEmpty() ? "Jellyfin Games" : folders.get(folders.size()-1).optString("Name"));
++    }
++    private void cancel() { generation++; if (operation != null) operation.cancel(); operation = null; busy = false; }
++    private void up() { if (!downloading && !folders.isEmpty()) { folders.remove(folders.size()-1); search.setText(""); load(false); } }
++    @Override public void onBackPressed() { if (downloading) return; if (!folders.isEmpty()) up(); else super.onBackPressed(); }
++    private void error(Throwable e) { if (!isFinishing() && !isDestroyed()) new AlertDialog.Builder(this).setTitle("Jellyfin").setMessage(e.getMessage() == null ? "Request failed. Please try again." : e.getMessage()).setPositiveButton("OK",null).show(); }
++    private void load(boolean next) {
++        if (account == null || downloading) return;
++        cancel(); int current = generation; busy = true;
++        if (!next) { rows.clear(); offset = 0; more = false; }
++        adapter.notifyDataSetChanged(); message.setText("Loading…"); update();
++        JellyfinApi call = api(); operation = call;
++        String parent = folders.isEmpty() ? null : folders.get(folders.size()-1).optString("Id"); String term = search.getText().toString(); int start = offset;
++        worker.execute(() -> {
++            try {
++                JSONObject page = parent == null ? call.libraries() : call.items(parent,start,term);
++                JSONArray items = page.optJSONArray("Items"); if (items == null) throw new IOException("The server did not return a library.");
++                runOnUiThread(() -> {
++                    if (current != generation || isDestroyed()) return;
++                    offset += items.length(); more = parent != null && items.length() > 0 && offset < page.optInt("TotalRecordCount", offset + (items.length()==100 ? 1 : 0));
++                    Set<String> known = new HashSet<>(); for (JSONObject row : rows) known.add(row.optString("Id"));
++                    for (int i=0;i<items.length();i++) { JSONObject item = items.optJSONObject(i); if (item == null || !known.add(item.optString("Id"))) continue;
++                        String name = JellyfinApi.filename(item);
++                        if (parent == null || item.optBoolean("IsFolder") || name.isEmpty() || JellyfinApi.supported(name)) rows.add(item);
++                    }
++                    busy = false; adapter.notifyDataSetChanged(); update();
++                    message.setText(rows.isEmpty() ? "No games or folders found. Jellyfin must index the files and your account must have access." : (parent == null ? "Choose a library" : "Choose a folder or game"));
++                    if (!next) list.setSelection(0);
++                });
++            } catch (Exception e) { runOnUiThread(() -> { if (current == generation && !isDestroyed()) { busy=false; update(); message.setText("Could not load. Tap Libraries or Search to retry."); error(e); } }); }
++        });
++    }
++    private void login() {
++        if (busy) return;
++        LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL); form.setPadding(32,8,32,8);
++        EditText server = new EditText(this); server.setHint("https://media.example.com"); server.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI); form.addView(server);
++        EditText user = new EditText(this); user.setHint("Username"); user.setSingleLine(true); form.addView(user);
++        EditText password = new EditText(this); password.setHint("Password"); password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); form.addView(password);
++        new AlertDialog.Builder(this).setTitle("Sign in to Jellyfin").setMessage("Include any /jellyfin server base path. Use HTTPS outside your home network.").setView(form)
++            .setNegativeButton("Cancel",null).setPositiveButton("Sign in",(d,w) -> {
++                String address = server.getText().toString(), username = user.getText().toString(), secret = password.getText().toString(); password.setText("");
++                cancel(); int current = generation; busy=true; update(); message.setText("Signing in…");
++                worker.execute(() -> { try {
++                    String base = JellyfinApi.validateServer(address), device = UUID.randomUUID().toString();
++                    JellyfinApi call = new JellyfinApi(base,"","",device); operation=call;
++                    JSONObject result = call.json(base+"Users/AuthenticateByName",new JSONObject().put("Username",username).put("Pw",secret));
++                    JSONObject saved = new JSONObject().put("server",base).put("device",device).put("user",result.getJSONObject("User").getString("Id")).put("token",result.getString("AccessToken"));
++                    if (saved.getString("token").isEmpty()) throw new IOException("No sign-in token was returned.");
++                    runOnUiThread(() -> { if (current != generation || isDestroyed()) return; try { saveAccount(saved); account=saved; busy=false; load(false); } catch(Exception e) {busy=false;update();error(e);} });
++                } catch(Exception e) {runOnUiThread(() -> {if(current==generation && !isDestroyed()){busy=false;update();message.setText("Sign-in failed. Try again.");error(e);}});} });
++            }).show();
++    }
++    private void logout() {
++        cancel(); JellyfinApi previous = api(); account=null; folders.clear(); rows.clear(); more=false; covers.evictAll();
++        synchronized(imageCalls) { for (JellyfinApi call : imageCalls) call.cancel(); imageCalls.clear(); }
++        File file = new File(getNoBackupFilesDir(),"jellyfin-session");
++        if (file.exists() && !file.delete()) { error(new IOException("Could not remove saved sign-in.")); }
++        adapter.notifyDataSetChanged(); update(); message.setText("Signed out.");
++        worker.execute(() -> { try { previous.json(previous.server+"Sessions/Logout",new JSONObject()); } catch(Exception ignored) {} });
++    }
++    private void confirmDownload(JSONObject item) {
++        new AlertDialog.Builder(this).setTitle(item.optString("Name")).setMessage("Download this game, then play it from Downloaded games. Keep the app open until the download finishes.")
++            .setNegativeButton("Cancel",null).setPositiveButton("Download",(d,w)->download(item)).show();
++    }
++    private void download(JSONObject item) {
++        cancel(); int current=generation; busy=true; downloading=true; update(); JellyfinApi call=api(); operation=call;
++        File root = new File(getExternalFilesDir(null),"roms/Jellyfin");
++        try {
++            root = new File(root,hex(account.optString("server")+"/"+account.optString("user")));
++            for(JSONObject folder:folders) root=new File(root,folder.optString("Name").replaceAll("[^a-zA-Z0-9 ._-]","_").replace("..","_"));
++            root=new File(root,hex(item.optString("Id")));
++        } catch(Exception e) {busy=false;downloading=false;update();error(e);return;}
++        File destination=root;
++        AlertDialog progress=new AlertDialog.Builder(this).setTitle("Downloading "+item.optString("Name")).setMessage("Keep this app open. Large games can take several minutes.")
++            .setNegativeButton("Cancel",(d,w)->{call.cancel();message.setText("Cancelling download…");}).setCancelable(false).create(); progress.show();
++        worker.execute(() -> {try {
++            call.download(item,destination);
++            LibraryIndexScheduler.INSTANCE.scheduleLibrarySync(getApplicationContext());
++            runOnUiThread(()->{if(current!=generation || isDestroyed())return;busy=false;downloading=false;progress.dismiss();update();message.setText("Downloaded. The game library is being updated.");
++                new AlertDialog.Builder(this).setTitle("Game downloaded").setMessage("Open Downloaded games. After the scan finishes, tap the game to play. Some systems require BIOS files.")
++                    .setPositiveButton("Downloaded games",(d,w)->startActivity(new Intent(this,MainActivity.class))).setNegativeButton("Keep browsing",null).show();});
++        }catch(Exception e){runOnUiThread(()->{if(current!=generation || isDestroyed())return;busy=false;downloading=false;progress.dismiss();update();message.setText(call.cancelled?"Download cancelled.":"Download failed.");if(!call.cancelled)error(e);});}});
++    }
++    private static String hex(String value) throws Exception {
++        byte[] digest=MessageDigest.getInstance("SHA-256").digest(value.getBytes("UTF-8"));StringBuilder result=new StringBuilder();for(byte b:digest)result.append(String.format(Locale.ROOT,"%02x",b));return result.toString();
++    }
++    private void cover(JSONObject item, ImageView view) {
++        JSONObject tags=item.optJSONObject("ImageTags"); if(tags==null || !tags.has("Primary") || account==null)return;
++        String id=item.optString("Id"), key=id+":"+tags.optString("Primary");Bitmap cached=covers.get(key);if(cached!=null){view.setImageBitmap(cached);return;}
++        JellyfinApi call=api();imageCalls.add(call);int current=generation;
++        images.execute(()->{HttpURLConnection c=null;try{
++            c=call.connect(call.url("Items/"+Uri.encode(id)+"/Images/Primary").appendQueryParameter("maxWidth","160").appendQueryParameter("tag",tags.optString("Primary")).build().toString(),"GET");JellyfinApi.check(c);
++            try(InputStream in=c.getInputStream();ByteArrayOutputStream out=new ByteArrayOutputStream()) {byte[] buffer=new byte[8192];int n;while((n=in.read(buffer))!=-1){if(out.size()+n>2*1024*1024)throw new IOException("Cover too large");out.write(buffer,0,n);}byte[] bytes=out.toByteArray();Bitmap bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.length);
++                if(bitmap!=null)runOnUiThread(()->{if(current==generation && !isDestroyed()){covers.put(key,bitmap);view.setImageBitmap(bitmap);}});}
++        }catch(Exception ignored){}finally{if(c!=null)c.disconnect();imageCalls.remove(call);}});
++    }
++    private SecretKey key() throws Exception {
++        KeyStore store=KeyStore.getInstance("AndroidKeyStore");store.load(null);
++        if(!store.containsAlias("jellyfin-session")){KeyGenerator generator=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore");generator.init(new KeyGenParameterSpec.Builder("jellyfin-session",KeyProperties.PURPOSE_ENCRYPT|KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build());generator.generateKey();}
++        return (SecretKey)store.getKey("jellyfin-session",null);
++    }
++    private void saveAccount(JSONObject value) throws Exception {
++        Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key());byte[] encoded=cipher.doFinal(value.toString().getBytes("UTF-8"));
++        try(DataOutputStream out=new DataOutputStream(new FileOutputStream(new File(getNoBackupFilesDir(),"jellyfin-session")))){out.writeInt(cipher.getIV().length);out.write(cipher.getIV());out.write(encoded);}
++    }
++    private JSONObject readAccount() throws Exception {
++        File file=new File(getNoBackupFilesDir(),"jellyfin-session");if(!file.exists())return null;
++        try(DataInputStream in=new DataInputStream(new FileInputStream(file))){int length=in.readInt();if(length!=12 || file.length()>65536)throw new IOException("Invalid saved account");byte[] iv=new byte[length];in.readFully(iv);ByteArrayOutputStream bytes=new ByteArrayOutputStream();byte[] b=new byte[1024];int n;while((n=in.read(b))!=-1)bytes.write(b,0,n);Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,iv));return new JSONObject(new String(cipher.doFinal(bytes.toByteArray()),"UTF-8"));}
++    }
++    @Override protected void onDestroy(){cancel();synchronized(imageCalls){for(JellyfinApi call:imageCalls)call.cancel();imageCalls.clear();}worker.shutdownNow();images.shutdownNow();super.onDestroy();}
++}
+diff --git a/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApi.java b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApi.java
+new file mode 100644
+index 0000000..378e8a7
+--- /dev/null
++++ b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApi.java
+@@ -0,0 +1,147 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.swordfish.lemuroid.app.jellyfin;
++
++import android.net.Uri;
++import org.json.JSONObject;
++import java.io.*;
++import java.net.*;
++import java.nio.charset.StandardCharsets;
++import java.util.Locale;
++
++final class JellyfinApi {
++    final String server, user, token, device;
++    volatile boolean cancelled;
++    private volatile HttpURLConnection active;
++
++    JellyfinApi(String server, String user, String token, String device) {
++        this.server = server; this.user = user; this.token = token; this.device = device;
++    }
++
++    static String validateServer(String value) throws Exception {
++        URI uri = new URI(value.trim());
++        if (!("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme())) ||
++            uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null)
++            throw new IOException("Enter a full server address, such as https://media.example.com or http://192.168.1.10:8096.");
++        String result = uri.toASCIIString();
++        return result.endsWith("/") ? result : result + "/";
++    }
++
++    private static String header(String s) {
++        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "").replace("\n", "");
++    }
++
++    Uri.Builder url(String path) { return Uri.parse(server + path).buildUpon(); }
++
++    HttpURLConnection connect(String url, String method) throws Exception {
++        if (cancelled) throw new InterruptedIOException("Cancelled");
++        URL target = new URL(url), origin = new URL(server);
++        if (!target.getProtocol().equalsIgnoreCase(origin.getProtocol()) || !target.getHost().equalsIgnoreCase(origin.getHost()) || target.getPort() != origin.getPort())
++            throw new IOException("The server request changed destination.");
++        HttpURLConnection c = (HttpURLConnection) target.openConnection();
++        active = c;
++        c.setInstanceFollowRedirects(false);
++        c.setConnectTimeout(20000); c.setReadTimeout(60000); c.setRequestMethod(method);
++        c.setRequestProperty("Authorization", "MediaBrowser Client=\"Jellyfin Games\", Device=\"Android\", DeviceId=\"" + header(device) + "\", Version=\"1.0\", Token=\"" + header(token) + "\"");
++        if (cancelled) { c.disconnect(); throw new InterruptedIOException("Cancelled"); }
++        return c;
++    }
++
++    static void check(HttpURLConnection c) throws Exception {
++        int code = c.getResponseCode();
++        if (code == 401) throw new IOException("Sign-in expired or was rejected. Sign out and sign in again.");
++        if (code == 403) throw new IOException("Your account does not have permission for this library or download.");
++        if (code < 200 || code >= 300) throw new HttpError(code);
++    }
++    static final class HttpError extends IOException {
++        final int code;
++        HttpError(int code) { super("Jellyfin returned HTTP " + code + ". Check your server address."); this.code = code; }
++    }
++
++    JSONObject json(String url, JSONObject body) throws Exception {
++        HttpURLConnection c = connect(url, body == null ? "GET" : "POST");
++        try {
++            if (body != null) {
++                c.setDoOutput(true); c.setRequestProperty("Content-Type", "application/json");
++                try (OutputStream out = c.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
++            }
++            check(c);
++            try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
++                byte[] buffer = new byte[8192]; int n;
++                while ((n = in.read(buffer)) != -1) {
++                    if (cancelled) throw new InterruptedIOException("Cancelled");
++                    if (out.size() + n > 16 * 1024 * 1024) throw new IOException("Server response is too large.");
++                    out.write(buffer, 0, n);
++                }
++                return new JSONObject(out.toString("UTF-8"));
++            }
++        } finally { c.disconnect(); }
++    }
++
++    JSONObject libraries() throws Exception {
++        try { return json(url("UserViews").appendQueryParameter("userId", user).build().toString(), null); }
++        catch (HttpError e) {
++            if (e.code != 404) throw e;
++            return json(url("Users/" + Uri.encode(user) + "/Views").build().toString(), null);
++        }
++    }
++    JSONObject items(String parent, int start, String search) throws Exception {
++        boolean searching = !search.trim().isEmpty();
++        Uri.Builder b = url("Items").appendQueryParameter("userId", user).appendQueryParameter("parentId", parent)
++            .appendQueryParameter("recursive", searching ? "true" : "false")
++            .appendQueryParameter("fields", "Path").appendQueryParameter("sortBy", searching ? "SortName" : "IsFolder,SortName")
++            .appendQueryParameter("sortOrder", searching ? "Ascending" : "Descending,Ascending")
++            .appendQueryParameter("startIndex", String.valueOf(start)).appendQueryParameter("limit", "100")
++            .appendQueryParameter("enableTotalRecordCount", "true").appendQueryParameter("searchTerm", search.trim());
++        if (searching) b.appendQueryParameter("filters", "IsNotFolder");
++        return json(b.build().toString(), null);
++    }
++    static String filename(JSONObject item) {
++        String path = item.optString("Path", "").replace('\\', '/');
++        return path.substring(path.lastIndexOf('/') + 1);
++    }
++    static boolean supported(String name) {
++        int dot = name.lastIndexOf('.');
++        if (dot < 0) return false;
++        String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
++        return ("|nes|fds|sfc|smc|gb|gbc|gba|nds|3ds|cci|cxi|z64|v64|n64|md|gen|smd|sms|gg|bin|cue|iso|cso|chd|pbp|m3u|pce|sgx|ngp|ngc|ws|wsc|a26|a78|lnx|zip|dosz|").contains("|" + ext + "|");
++    }
++    void download(JSONObject item, File root) throws Exception {
++        HttpURLConnection c = connect(url("Items/" + Uri.encode(item.getString("Id")) + "/Download").build().toString(), "GET");
++        File temporary = null;
++        try {
++            check(c);
++            String type = c.getContentType();
++            if (type != null && (type.toLowerCase(Locale.ROOT).contains("html") || type.toLowerCase(Locale.ROOT).contains("json")))
++                throw new IOException("The server returned a page instead of a game.");
++            String name = filename(item);
++            if (name.isEmpty()) {
++                String disposition = c.getHeaderField("Content-Disposition");
++                if (disposition != null) {
++                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("filename=\"?([^\";]+)").matcher(disposition);
++                    if (m.find()) name = m.group(1).trim();
++                }
++            }
++            if (name.contains("/") || name.contains("\\") || name.contains(":") || name.indexOf(0) >= 0 || !supported(name))
++                throw new IOException("This item is not a supported game file or ZIP archive.");
++            String ext = name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
++            if (ext.equals("cue") || ext.equals("m3u")) throw new IOException("This file needs companion files. Use a complete supported ZIP archive or a single-file CHD instead.");
++            if (!root.isDirectory() && !root.mkdirs()) throw new IOException("Could not create the games folder.");
++            temporary = new File(root, ".download-part");
++            long expected = c.getContentLengthLong(), total = 0;
++            try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(temporary)) {
++                byte[] buffer = new byte[65536]; int n;
++                while ((n = in.read(buffer)) != -1) {
++                    if (cancelled) throw new InterruptedIOException("Cancelled");
++                    out.write(buffer, 0, n); total += n;
++                }
++                out.getFD().sync();
++            }
++            if (cancelled) throw new InterruptedIOException("Cancelled");
++            if (total == 0 || (expected >= 0 && expected != total)) throw new IOException("The download was incomplete. Please try again.");
++            File target = new File(root, name);
++            if (target.exists()) throw new IOException("This game is already downloaded. Open Downloaded games to play it.");
++            if (!temporary.renameTo(target)) throw new IOException("Could not save the downloaded game.");
++        } finally { c.disconnect(); if (temporary != null) temporary.delete(); }
++    }
++    void cancel() { cancelled = true; HttpURLConnection c = active; if (c != null) c.disconnect(); }
++}
+diff --git a/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/mobile/feature/settings/general/SettingsScreen.kt b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/mobile/feature/settings/general/SettingsScreen.kt
+index 2a3c04c..f118c88 100644
+--- a/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/mobile/feature/settings/general/SettingsScreen.kt
++++ b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/mobile/feature/settings/general/SettingsScreen.kt
+@@ -1,6 +1,8 @@
+ package com.swordfish.lemuroid.app.mobile.feature.settings.general
+ 
+ import android.net.Uri
++import android.content.Intent
++import com.swordfish.lemuroid.app.jellyfin.JellyfinActivity
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+@@ -46,7 +48,15 @@ fun SettingsScreen(
+             .collectAsState(false)
+             .value
+ 
++    val jellyfinContext = LocalContext.current
+     LemuroidSettingsPage(modifier = modifier) {
++        LemuroidCardSettingsGroup(title = { Text("Game libraries") }) {
++            LemuroidSettingsMenuLink(
++                title = { Text("Jellyfin") },
++                subtitle = { Text("Browse console folders and download games") },
++                onClick = { jellyfinContext.startActivity(Intent(jellyfinContext, JellyfinActivity::class.java)) },
++            )
++        }
+         RomsSettings(
+             state = state,
+             onChangeFolder = { viewModel.changeLocalStorageFolder() },
+diff --git a/lemuroid-app/src/main/res/xml/network_security_config.xml b/lemuroid-app/src/main/res/xml/network_security_config.xml
+index 3f97e9a..94f0746 100644
+--- a/lemuroid-app/src/main/res/xml/network_security_config.xml
++++ b/lemuroid-app/src/main/res/xml/network_security_config.xml
+@@ -1,5 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <network-security-config>
++    <!-- User-configured Jellyfin servers may be local HTTP endpoints. TLS verification remains enabled. -->
++    <base-config cleartextTrafficPermitted="true" />
+     <!-- Apparently a lot of covers in ovgdb are using cleartext http. This is something that we should fix -->
+     <domain-config cleartextTrafficPermitted="true">
+         <domain includeSubdomains="true">thumbnails.libretro.com</domain>
+diff --git a/lemuroid-app/src/test/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApiTest.java b/lemuroid-app/src/test/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApiTest.java
+new file mode 100644
+index 0000000..fc955a2
+--- /dev/null
++++ b/lemuroid-app/src/test/java/com/swordfish/lemuroid/app/jellyfin/JellyfinApiTest.java
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.swordfish.lemuroid.app.jellyfin;
++import org.junit.Test;
++import org.json.JSONObject;
++import static org.junit.Assert.*;
++public class JellyfinApiTest {
++ @Test public void serverPreservesBasePath() throws Exception {
++  assertEquals("https://example.com/jellyfin/",JellyfinApi.validateServer(" https://example.com/jellyfin "));
++  assertEquals("http://192.168.1.10:8096/",JellyfinApi.validateServer("http://192.168.1.10:8096"));
++ }
++ @Test public void rejectsUnsafeServerAddresses() throws Exception {
++  for(String value:new String[]{"example.com","file:///tmp/game","https://user:pass@example.com","https://example.com?token=secret","https://example.com/#/home"}) {
++   try {JellyfinApi.validateServer(value);fail(value);}catch(java.io.IOException|java.net.URISyntaxException expected){}
++  }
++ }
++ @Test public void filenamesHandleWindowsAndMissingPaths() throws Exception {
++  assertEquals("Mario.nes",JellyfinApi.filename(new JSONObject().put("Path","C:\\NES\\Mario.nes")));
++  assertEquals("",JellyfinApi.filename(new JSONObject()));
++ }
++ @Test public void recognisesGamesAndRejectsWebPages() {
++  assertTrue(JellyfinApi.supported("Game.NES"));assertTrue(JellyfinApi.supported("Game.sfc"));
++  assertTrue(JellyfinApi.supported("Game.chd"));assertFalse(JellyfinApi.supported("error.html"));assertFalse(JellyfinApi.supported("folder"));
++ }
++}
