@@ -1,0 +1,1025 @@
+diff --git a/.github/workflows/jellyfin.yml b/.github/workflows/jellyfin.yml
+new file mode 100644
+index 0000000..8261fc1
+--- /dev/null
++++ b/.github/workflows/jellyfin.yml
+@@ -0,0 +1,62 @@
++name: Jellyfin checks and iOS build
++
++on:
++  workflow_dispatch:
++    inputs:
++      build_app:
++        description: "Also attempt an unsigned iOS build (large dependency download)"
++        type: boolean
++        default: false
++
++permissions:
++  contents: read
++
++jobs:
++  client-tests:
++    runs-on: macos-15
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@v4
++      - name: Run Jellyfin client tests
++        run: swift test
++
++  ios-build:
++    if: ${{ inputs.build_app }}
++    needs: client-tests
++    runs-on: macos-15
++    timeout-minutes: 90
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          lfs: true
++          submodules: recursive
++      - name: Fetch dependency binaries
++        run: git submodule foreach --recursive 'git lfs pull'
++      - name: Install Boost
++        run: brew list boost >/dev/null 2>&1 || brew install boost
++      - name: Archive unsigned iOS app
++        run: |
++          set -o pipefail
++          xcodebuild -project ManicEmu/ManicEmu.xcodeproj \
++            -scheme ManicEmuSideload -configuration SideloadRelease \
++            -destination 'generic/platform=iOS' \
++            -archivePath "$RUNNER_TEMP/ManicEMU.xcarchive" \
++            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
++            archive 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
++      - name: Package unsigned IPA
++        run: |
++          mkdir -p "$RUNNER_TEMP/ipa/Payload"
++          cp -R "$RUNNER_TEMP/ManicEMU.xcarchive/Products/Applications/"*.app "$RUNNER_TEMP/ipa/Payload/"
++          cd "$RUNNER_TEMP/ipa"
++          ditto -c -k --sequesterRsrc --keepParent Payload "$RUNNER_TEMP/ManicEMU-Jellyfin-unsigned.ipa"
++      - uses: actions/upload-artifact@v4
++        with:
++          name: ManicEMU-Jellyfin-unsigned
++          path: ${{ runner.temp }}/ManicEMU-Jellyfin-unsigned.ipa
++          if-no-files-found: error
++      - uses: actions/upload-artifact@v4
++        if: always()
++        with:
++          name: iOS-build-log
++          path: ${{ runner.temp }}/xcodebuild.log
++          if-no-files-found: ignore
+diff --git a/JELLYFIN.md b/JELLYFIN.md
+new file mode 100644
+index 0000000..536efbe
+--- /dev/null
++++ b/JELLYFIN.md
+@@ -0,0 +1,55 @@
++# Jellyfin game library integration
++
++Source implementation based on Manic-EMU/ManicEMU commit `b1d82af8dbd37ab9995ad44a4334ea90e3c22b6f`.
++
++## Using it
++
++Open **Import → Add service → Game libraries → Jellyfin**. Enter your server's full URL (including a reverse-proxy base path if applicable), username, and password. Select the library containing your games. Search or browse covers, select a game, and keep the app open while it downloads. ManicEMU's existing importer then adds it to the local Games library, where you can launch it.
++
++The existing membership requirement for adding import services still applies. Reopen the same Jellyfin entry to return to the saved account. The first version supports one account at a time; use Sign Out to switch servers or users.
++
++Jellyfin must expose the ROMs as indexed items. Placing arbitrary ROM files in an ordinary Jellyfin media folder does not ensure Jellyfin indexes them. If the game library is empty, check that the games are visible as items in Jellyfin itself and accessible to this account. A game-library plugin may be necessary on the server. This client does not scan server disks or add server-side indexing.
++
++## Implemented
++
++- Username/password sign-in through Jellyfin, with device-only Keychain token storage. Passwords are not persisted.
++- User-visible library selection, server-side search, and 100-item pagination.
++- Authenticated covers and filtering of known filenames to ManicEMU's game/archive formats. Items whose paths are hidden remain visible so the response filename can identify them.
++- Download to disk, cancellation, HTTP error handling, and import through `FilesImporter` with temporary-directory cleanup.
++- Server base paths and the modern `/UserViews` API with a 404 fallback to the older user-specific endpoint.
++- Authenticated requests do not follow redirects to a different origin or from HTTPS to HTTP.
++- Sign-out deletes the local credential and attempts to revoke the server session. Offline sign-out cannot guarantee remote revocation.
++
++## Scope and current limitations
++
++- This is source code, not a compiled or device-tested app. No connection to the user's server has been made.
++- Windows checks: Swift syntax parsing, Xcode source-reference checks, plist parsing, and API-contract checks. These do not establish that the app compiles.
++- Eight Swift client tests are included but have not been executed here; a macOS test runner is required.
++- The GitHub Actions app build is an unexecuted build recipe. Upstream dependencies, LFS availability, SDK compatibility, or signing configuration may need fixes after its first run.
++- Games are downloaded before playing. There is no server-side game streaming, automatic launch, offline remote catalog, or Jellyfin save/progress synchronization.
++- Artwork is displayed in the remote browser; this version does not overwrite local ManicEMU artwork.
++- Multi-file games must be packaged in an archive containing all required files. A standalone CUE/M3U/GDI cannot fetch its companion files. JellyEmu-specific J3U and RomM pointer downloads are not implemented.
++- Download permission must be enabled for the Jellyfin account. Unsupported emulator systems remain unsupported.
++- Local networking is enabled through Apple's `NSAllowsLocalNetworking` setting. HTTPS is the supported choice for remote hostnames. iOS transport restrictions may reject some HTTP/IP configurations; use a valid HTTPS server address if that occurs. Certificate validation remains enabled.
++- New UI copy is English. Download UI is cancellable with a status message; it does not yet show byte-level progress or resume interrupted downloads.
++
++## Building without owning a Mac
++
++The included **Jellyfin checks and iOS build** workflow uses GitHub-hosted macOS. First apply these files to your own fork of ManicEMU at the base commit above, and commit them to its default branch. Under GitHub Actions, run the workflow with its default settings to execute the client tests. Then rerun with **Also attempt an unsigned iOS build** enabled.
++
++If successful, download the `ManicEMU-Jellyfin-unsigned` artifact. It still needs signing through your sideloading setup before an iPhone can install it. The workflow does not receive Apple credentials, sign the app, publish a release, or install anything. Review your account's Actions allowance before starting a hosted build.
++
++If the build fails, the workflow retains the Xcode build log for diagnosis. No hosted job has been started as part of this delivery.
++
++On a Mac, run `swift test` from the repository root to run the focused client tests. For the full app, fetch Git LFS content and recursive submodules, open the Xcode project, and build the `ManicEmuSideload` scheme. Use the upstream project requirements for its emulator dependencies.
++
++## Device acceptance checks
++
++1. Sign in with a valid account. Restart the app and reopen Jellyfin; verify the account is remembered. Try a wrong password and an unreachable server.
++2. Select a games library; compare titles and covers to Jellyfin. Search for a title containing `&` or non-ASCII characters. Verify more than 100 items can be browsed.
++3. Download a small supported single-file ROM, launch it from Games, and verify the original server file remains unchanged. Repeat the import to exercise ManicEMU's existing duplicate handling.
++4. Cancel a large download; then start another. Deny downloads for the account and verify a permission error. Test interrupted networking and server-side token revocation.
++5. Test a server installed under `/jellyfin`, a local server, and a valid HTTPS reverse proxy. Verify another user's restricted library never appears.
++6. Sign out, restart the app, and verify sign-in is required. Test iPhone and iPad presentation, search, Close, and import completion.
++
++API reference used: https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json
+diff --git a/ManicEmu/ManicEmu.xcodeproj/project.pbxproj b/ManicEmu/ManicEmu.xcodeproj/project.pbxproj
+index 6878358..6c2c2bc 100644
+--- a/ManicEmu/ManicEmu.xcodeproj/project.pbxproj
++++ b/ManicEmu/ManicEmu.xcodeproj/project.pbxproj
+@@ -163,6 +163,7 @@
+ 		575FF8E82D34A6DF0043B2F3 /* System.swift in Sources */ = {isa = PBXBuildFile; fileRef = 575FF8E72D34A6DF0043B2F3 /* System.swift */; };
+ 		575FF91D2D350F210043B2F3 /* PlayViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 575FF91C2D350F170043B2F3 /* PlayViewController.swift */; };
+ 		57605FFC2D20F28100A98B0C /* ImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57605FFB2D20F28100A98B0C /* ImportViewController.swift */; };
++		A91E11F20000000000000002 /* JellyfinViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F20000000000000001 /* JellyfinViewController.swift */; };
+ 		57605FFE2D20F29000A98B0C /* SettingsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57605FFD2D20F29000A98B0C /* SettingsViewController.swift */; };
+ 		576060182D22BC5900A98B0C /* PersistedKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576060172D22BC5200A98B0C /* PersistedKit.swift */; };
+ 		576060222D24E07500A98B0C /* AnimatedGradientView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576060212D24E07500A98B0C /* AnimatedGradientView.swift */; };
+@@ -218,6 +219,7 @@
+ 		577005B52D3E6F3000762E8F /* AddImportServiceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005B42D3E6F3000762E8F /* AddImportServiceView.swift */; };
+ 		577005B72D3E715500762E8F /* ImportServiceListCollectionViewCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005B62D3E715500762E8F /* ImportServiceListCollectionViewCell.swift */; };
+ 		577005B92D3E71BC00762E8F /* ImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005B82D3E71B200762E8F /* ImportService.swift */; };
++		A91E11F10000000000000002 /* JellyfinClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F10000000000000001 /* JellyfinClient.swift */; };
+ 		577005D42D3F2F8E00762E8F /* WebServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005D32D3F2F8200762E8F /* WebServer.swift */; };
+ 		577005D62D3F398100762E8F /* PasteImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005D52D3F396C00762E8F /* PasteImporter.swift */; };
+ 		577005DA2D3F404F00762E8F /* ImportError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005D92D3F404D00762E8F /* ImportError.swift */; };
+@@ -543,6 +545,7 @@
+ 		5790947A303C7D9100A53656 /* AddCheatCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B6ECBF2D7969DA002E619C /* AddCheatCodeView.swift */; };
+ 		5790947B303C7D9100A53656 /* PSPNetworkingConfigOnlineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578F28DA2F39FBC100D2D998 /* PSPNetworkingConfigOnlineView.swift */; };
+ 		5790947C303C7D9100A53656 /* ImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57605FFB2D20F28100A98B0C /* ImportViewController.swift */; };
++		A91E11F20000000000000003 /* JellyfinViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F20000000000000001 /* JellyfinViewController.swift */; };
+ 		5790947D303C7D9100A53656 /* GameCoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570F591F2DC7AC9E007BFD92 /* GameCoverView.swift */; };
+ 		5790947E303C7D9100A53656 /* GameOptionPerform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57D483953020EA6A0030A771 /* GameOptionPerform.swift */; };
+ 		5790947F303C7D9100A53656 /* SideMenuShowStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B262620F2A260E4C00174003 /* SideMenuShowStyle.swift */; };
+@@ -555,6 +558,7 @@
+ 		57909486303C7D9100A53656 /* J2MEView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57DC7FF32F52E92B004B6FFD /* J2MEView.swift */; };
+ 		57909487303C7D9100A53656 /* PSPNetworkingConfigLocalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578F28D42F39E0A100D2D998 /* PSPNetworkingConfigLocalView.swift */; };
+ 		57909488303C7D9100A53656 /* ImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005B82D3E71B200762E8F /* ImportService.swift */; };
++		A91E11F10000000000000003 /* JellyfinClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F10000000000000001 /* JellyfinClient.swift */; };
+ 		57909489303C7D9100A53656 /* ShaderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570622EB2D7BD2F6004F09E7 /* ShaderManager.swift */; };
+ 		5790948A303C7D9100A53656 /* AddTriggerButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57D7CF612EA792F900F41540 /* AddTriggerButtonView.swift */; };
+ 		5790948B303C7D9100A53656 /* GameShortCutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57D48374301F57B90030A771 /* GameShortCutView.swift */; };
+@@ -1181,6 +1185,7 @@
+ 		57CDCE622FD5CBD3005BA4C8 /* AddCheatCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B6ECBF2D7969DA002E619C /* AddCheatCodeView.swift */; };
+ 		57CDCE642FD5CBD3005BA4C8 /* PSPNetworkingConfigOnlineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578F28DA2F39FBC100D2D998 /* PSPNetworkingConfigOnlineView.swift */; };
+ 		57CDCE652FD5CBD3005BA4C8 /* ImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57605FFB2D20F28100A98B0C /* ImportViewController.swift */; };
++		A91E11F20000000000000004 /* JellyfinViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F20000000000000001 /* JellyfinViewController.swift */; };
+ 		57CDCE672FD5CBD3005BA4C8 /* GameCoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570F591F2DC7AC9E007BFD92 /* GameCoverView.swift */; };
+ 		57CDCE6B2FD5CBD3005BA4C8 /* SideMenuShowStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B262620F2A260E4C00174003 /* SideMenuShowStyle.swift */; };
+ 		57CDCE6D2FD5CBD3005BA4C8 /* menu_pipeline.metal in Sources */ = {isa = PBXBuildFile; fileRef = 57BFBE4C2DD3326400AABF98 /* menu_pipeline.metal */; };
+@@ -1190,6 +1195,7 @@
+ 		57CDCE722FD5CBD3005BA4C8 /* J2MEView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57DC7FF32F52E92B004B6FFD /* J2MEView.swift */; };
+ 		57CDCE732FD5CBD3005BA4C8 /* PSPNetworkingConfigLocalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578F28D42F39E0A100D2D998 /* PSPNetworkingConfigLocalView.swift */; };
+ 		57CDCE742FD5CBD3005BA4C8 /* ImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 577005B82D3E71B200762E8F /* ImportService.swift */; };
++		A91E11F10000000000000004 /* JellyfinClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91E11F10000000000000001 /* JellyfinClient.swift */; };
+ 		57CDCE752FD5CBD3005BA4C8 /* ShaderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570622EB2D7BD2F6004F09E7 /* ShaderManager.swift */; };
+ 		57CDCE762FD5CBD3005BA4C8 /* AddTriggerButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57D7CF612EA792F900F41540 /* AddTriggerButtonView.swift */; };
+ 		57CDCE772FD5CBD3005BA4C8 /* MAMEBiosView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B5E3342ECDF75800DE17E9 /* MAMEBiosView.swift */; };
+@@ -1928,6 +1934,7 @@
+ 		575FF8E72D34A6DF0043B2F3 /* System.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System.swift; sourceTree = "<group>"; };
+ 		575FF91C2D350F170043B2F3 /* PlayViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayViewController.swift; sourceTree = "<group>"; };
+ 		57605FFB2D20F28100A98B0C /* ImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportViewController.swift; sourceTree = "<group>"; };
++		A91E11F20000000000000001 /* JellyfinViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinViewController.swift; sourceTree = "<group>"; };
+ 		57605FFD2D20F29000A98B0C /* SettingsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewController.swift; sourceTree = "<group>"; };
+ 		576060172D22BC5200A98B0C /* PersistedKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedKit.swift; sourceTree = "<group>"; };
+ 		576060212D24E07500A98B0C /* AnimatedGradientView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedGradientView.swift; sourceTree = "<group>"; };
+@@ -1968,6 +1975,7 @@
+ 		577005B42D3E6F3000762E8F /* AddImportServiceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddImportServiceView.swift; sourceTree = "<group>"; };
+ 		577005B62D3E715500762E8F /* ImportServiceListCollectionViewCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportServiceListCollectionViewCell.swift; sourceTree = "<group>"; };
+ 		577005B82D3E71B200762E8F /* ImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportService.swift; sourceTree = "<group>"; };
++		A91E11F10000000000000001 /* JellyfinClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinClient.swift; sourceTree = "<group>"; };
+ 		577005D32D3F2F8200762E8F /* WebServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebServer.swift; sourceTree = "<group>"; };
+ 		577005D52D3F396C00762E8F /* PasteImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteImporter.swift; sourceTree = "<group>"; };
+ 		577005D92D3F404D00762E8F /* ImportError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportError.swift; sourceTree = "<group>"; };
+@@ -6977,6 +6985,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				57605FFB2D20F28100A98B0C /* ImportViewController.swift */,
++				A91E11F20000000000000001 /* JellyfinViewController.swift */,
+ 			);
+ 			path = ViewControllers;
+ 			sourceTree = "<group>";
+@@ -12575,6 +12584,7 @@
+ 				57F632AC2D6FEC25007270E8 /* WebDavServiceProvider.swift */,
+ 				57F632AA2D6FEBE7007270E8 /* SMBServiceProvider.swift */,
+ 				577005B82D3E71B200762E8F /* ImportService.swift */,
++				A91E11F10000000000000001 /* JellyfinClient.swift */,
+ 			);
+ 			path = Models;
+ 			sourceTree = "<group>";
+@@ -13733,6 +13743,7 @@
+ 				5790947A303C7D9100A53656 /* AddCheatCodeView.swift in Sources */,
+ 				5790947B303C7D9100A53656 /* PSPNetworkingConfigOnlineView.swift in Sources */,
+ 				5790947C303C7D9100A53656 /* ImportViewController.swift in Sources */,
++				A91E11F20000000000000003 /* JellyfinViewController.swift in Sources */,
+ 				5790947D303C7D9100A53656 /* GameCoverView.swift in Sources */,
+ 				5790947E303C7D9100A53656 /* GameOptionPerform.swift in Sources */,
+ 				5790947F303C7D9100A53656 /* SideMenuShowStyle.swift in Sources */,
+@@ -13745,6 +13756,7 @@
+ 				57909486303C7D9100A53656 /* J2MEView.swift in Sources */,
+ 				57909487303C7D9100A53656 /* PSPNetworkingConfigLocalView.swift in Sources */,
+ 				57909488303C7D9100A53656 /* ImportService.swift in Sources */,
++				A91E11F10000000000000003 /* JellyfinClient.swift in Sources */,
+ 				57909489303C7D9100A53656 /* ShaderManager.swift in Sources */,
+ 				5790948A303C7D9100A53656 /* AddTriggerButtonView.swift in Sources */,
+ 				5790948B303C7D9100A53656 /* GameShortCutView.swift in Sources */,
+@@ -14183,6 +14195,7 @@
+ 				57CDCE622FD5CBD3005BA4C8 /* AddCheatCodeView.swift in Sources */,
+ 				57CDCE642FD5CBD3005BA4C8 /* PSPNetworkingConfigOnlineView.swift in Sources */,
+ 				57CDCE652FD5CBD3005BA4C8 /* ImportViewController.swift in Sources */,
++				A91E11F20000000000000004 /* JellyfinViewController.swift in Sources */,
+ 				57CDCE672FD5CBD3005BA4C8 /* GameCoverView.swift in Sources */,
+ 				57D483993020EA770030A771 /* GameOptionPerform.swift in Sources */,
+ 				57CDCE6B2FD5CBD3005BA4C8 /* SideMenuShowStyle.swift in Sources */,
+@@ -14195,6 +14208,7 @@
+ 				57CDCE722FD5CBD3005BA4C8 /* J2MEView.swift in Sources */,
+ 				57CDCE732FD5CBD3005BA4C8 /* PSPNetworkingConfigLocalView.swift in Sources */,
+ 				57CDCE742FD5CBD3005BA4C8 /* ImportService.swift in Sources */,
++				A91E11F10000000000000004 /* JellyfinClient.swift in Sources */,
+ 				57CDCE752FD5CBD3005BA4C8 /* ShaderManager.swift in Sources */,
+ 				57CDCE762FD5CBD3005BA4C8 /* AddTriggerButtonView.swift in Sources */,
+ 				57D48378301F57C20030A771 /* GameShortCutView.swift in Sources */,
+@@ -14596,6 +14610,7 @@
+ 				57B6ECC02D7969E2002E619C /* AddCheatCodeView.swift in Sources */,
+ 				578F28DB2F39FBC200D2D998 /* PSPNetworkingConfigOnlineView.swift in Sources */,
+ 				57605FFC2D20F28100A98B0C /* ImportViewController.swift in Sources */,
++				A91E11F20000000000000002 /* JellyfinViewController.swift in Sources */,
+ 				570F59202DC7ACA8007BFD92 /* GameCoverView.swift in Sources */,
+ 				57D4839A3020EA770030A771 /* GameOptionPerform.swift in Sources */,
+ 				B26262102A260E4C00174003 /* SideMenuShowStyle.swift in Sources */,
+@@ -14608,6 +14623,7 @@
+ 				57DC7FF52F52E931004B6FFD /* J2MEView.swift in Sources */,
+ 				578F28D52F39E0A200D2D998 /* PSPNetworkingConfigLocalView.swift in Sources */,
+ 				577005B92D3E71BC00762E8F /* ImportService.swift in Sources */,
++				A91E11F10000000000000002 /* JellyfinClient.swift in Sources */,
+ 				570622EC2D7BD2FE004F09E7 /* ShaderManager.swift in Sources */,
+ 				57D7CF622EA792FB00F41540 /* AddTriggerButtonView.swift in Sources */,
+ 				57D48379301F57C20030A771 /* GameShortCutView.swift in Sources */,
+diff --git a/ManicEmu/ManicEmu/Resources/Info.plist b/ManicEmu/ManicEmu/Resources/Info.plist
+index 9316213..2c7c6f6 100644
+--- a/ManicEmu/ManicEmu/Resources/Info.plist
++++ b/ManicEmu/ManicEmu/Resources/Info.plist
+@@ -8,7 +8,7 @@
+ 		<string>_ra_netplay._tcp</string>
+ 	</array>
+ 	<key>NSLocalNetworkUsageDescription</key>
+-	<string>Manic EMU needs access to your local network to find and connect with other devices for online gaming.</string>
++	<string>Manic EMU needs access to your local network to connect to game library servers and other devices for online gaming.</string>
+ 	<key>CFBundleDevelopmentRegion</key>
+ 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+ 	<key>CFBundleDisplayName</key>
+@@ -614,6 +614,8 @@
+ 	<true/>
+ 	<key>NSAppTransportSecurity</key>
+ 	<dict>
++		<key>NSAllowsLocalNetworking</key>
++		<true/>
+ 		<key>NSExceptionDomains</key>
+ 		<dict>
+ 			<key>baidu.com</key>
+diff --git a/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift b/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift
+new file mode 100644
+index 0000000..227ca50
+--- /dev/null
++++ b/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift
+@@ -0,0 +1,198 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++import Foundation
++
++struct JellyfinAccount: Codable {
++    let server: URL
++    let userID: String
++    let token: String
++    let deviceID: String
++}
++
++struct JellyfinItem: Decodable {
++    let Id: String
++    let Name: String
++    let Path: String?
++    let IsFolder: Bool?
++    let ImageTags: [String: String]?
++
++    var fileName: String {
++        (Path ?? "").replacingOccurrences(of: "\\", with: "/").components(separatedBy: "/").last ?? ""
++    }
++}
++
++struct JellyfinPage: Decodable {
++    let Items: [JellyfinItem]
++    let TotalRecordCount: Int?
++}
++
++enum JellyfinError: LocalizedError {
++    case message(String)
++    case http(Int)
++    var errorDescription: String? {
++        switch self {
++        case .message(let text): return text
++        case .http(401): return "Your Jellyfin sign-in expired or was rejected. Sign out and sign in again."
++        case .http(403): return "Your Jellyfin account does not have permission for this library or download."
++        case .http(404): return "Jellyfin could not find this item or endpoint. Check the server address and library."
++        case .http(let code): return "Jellyfin returned an error (HTTP \(code)). Please try again."
++        }
++    }
++}
++
++// Do not forward account credentials to a different origin, including via redirects.
++final class JellyfinRedirectGuard: NSObject, URLSessionTaskDelegate {
++    func urlSession(_ session: URLSession, task: URLSessionTask,
++                    willPerformHTTPRedirection response: HTTPURLResponse,
++                    newRequest request: URLRequest,
++                    completionHandler: @escaping (URLRequest?) -> Void) {
++        guard let original = task.originalRequest?.url, let target = request.url,
++              original.scheme == target.scheme, original.host == target.host,
++              original.port == target.port else {
++            completionHandler(nil)
++            return
++        }
++        completionHandler(request)
++    }
++}
++
++final class JellyfinClient {
++    let account: JellyfinAccount
++    private let session: URLSession
++
++    init(account: JellyfinAccount, session: URLSession? = nil) {
++        self.account = account
++        let configuration = URLSessionConfiguration.ephemeral
++        configuration.timeoutIntervalForRequest = 60
++        configuration.timeoutIntervalForResource = 60 * 60
++        self.session = session ?? URLSession(configuration: configuration,
++                                              delegate: JellyfinRedirectGuard(), delegateQueue: nil)
++    }
++
++    deinit { session.invalidateAndCancel() }
++
++    static func serverURL(_ address: String) throws -> URL {
++        guard let parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
++              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
++              let host = parts.host, !host.isEmpty,
++              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
++              let url = parts.url else {
++            throw JellyfinError.message("Enter your server's full address, such as https://media.example.com/jellyfin or http://192.168.1.10:8096.")
++        }
++        return url
++    }
++
++    func request(_ path: [String], query: [URLQueryItem] = [], method: String = "GET") throws -> URLRequest {
++        let url = path.reduce(account.server) { $0.appendingPathComponent($1) }
++        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
++            throw JellyfinError.message("Invalid Jellyfin server address.")
++        }
++        components.queryItems = query.isEmpty ? nil : query
++        guard let finalURL = components.url else { throw JellyfinError.message("Invalid Jellyfin request.") }
++        var request = URLRequest(url: finalURL)
++        request.httpMethod = method
++        // Header values returned by the server must never become extra auth parameters.
++        func escaped(_ value: String) -> String {
++            value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
++                .replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
++        }
++        var auth = "MediaBrowser Client=\"ManicEMU\", Device=\"ManicEMU\", DeviceId=\"\(escaped(account.deviceID))\", Version=\"1.0\""
++        if !account.token.isEmpty { auth += ", Token=\"\(escaped(account.token))\"" }
++        request.setValue(auth, forHTTPHeaderField: "Authorization")
++        request.setValue("application/json", forHTTPHeaderField: "Accept")
++        return request
++    }
++
++    private func validate(_ response: URLResponse) throws {
++        guard let http = response as? HTTPURLResponse else { throw JellyfinError.message("Invalid server response.") }
++        guard (200..<300).contains(http.statusCode) else { throw JellyfinError.http(http.statusCode) }
++    }
++
++    private func decode<T: Decodable>(_ request: URLRequest) async throws -> T {
++        let (data, response) = try await session.data(for: request)
++        try validate(response)
++        return try JSONDecoder().decode(T.self, from: data)
++    }
++
++    static func signIn(server: URL, username: String, password: String) async throws -> JellyfinAccount {
++        struct Authentication: Decodable {
++            struct UserInfo: Decodable { let Id: String }
++            let AccessToken: String
++            let User: UserInfo
++        }
++        let deviceID = UUID().uuidString
++        let client = JellyfinClient(account: .init(server: server, userID: "", token: "", deviceID: deviceID))
++        var request = try client.request(["Users", "AuthenticateByName"], method: "POST")
++        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
++        request.httpBody = try JSONSerialization.data(withJSONObject: ["Username": username, "Pw": password])
++        let result: Authentication = try await client.decode(request)
++        guard !result.AccessToken.isEmpty, !result.User.Id.isEmpty else {
++            throw JellyfinError.message("Jellyfin did not return a valid account session.")
++        }
++        return .init(server: server, userID: result.User.Id, token: result.AccessToken, deviceID: deviceID)
++    }
++
++    func libraries() async throws -> [JellyfinItem] {
++        let page: JellyfinPage
++        do {
++            page = try await decode(request(["UserViews"], query: [.init(name: "userId", value: account.userID)]))
++        } catch JellyfinError.http(404) {
++            // Older Jellyfin releases use the user ID in the path.
++            page = try await decode(request(["Users", account.userID, "Views"]))
++        }
++        return page.Items
++    }
++
++    func items(parentID: String, start: Int, search: String) async throws -> JellyfinPage {
++        try await decode(request(["Items"], query: [
++            .init(name: "userId", value: account.userID),
++            .init(name: "parentId", value: parentID),
++            .init(name: "recursive", value: "true"),
++            .init(name: "filters", value: "IsNotFolder"),
++            .init(name: "fields", value: "Path"),
++            .init(name: "sortBy", value: "SortName"),
++            .init(name: "sortOrder", value: "Ascending"),
++            .init(name: "startIndex", value: String(start)),
++            .init(name: "limit", value: "100"),
++            .init(name: "enableTotalRecordCount", value: "true"),
++            .init(name: "searchTerm", value: search)
++        ]))
++    }
++
++    func cover(_ item: JellyfinItem) async throws -> Data {
++        let request = try request(["Items", item.Id, "Images", "Primary"], query: [
++            .init(name: "maxWidth", value: "160"), .init(name: "quality", value: "85"),
++            .init(name: "tag", value: item.ImageTags?["Primary"])
++        ])
++        let (data, response) = try await session.data(for: request)
++        try validate(response)
++        return data
++    }
++
++    func download(_ item: JellyfinItem) async throws -> URL {
++        let request = try request(["Items", item.Id, "Download"])
++        let (temporary, response) = try await session.download(for: request)
++        defer { try? FileManager.default.removeItem(at: temporary) }
++        try validate(response)
++        try Task.checkCancellation()
++        let mime = response.mimeType?.lowercased() ?? ""
++        guard !mime.contains("html"), !mime.contains("json") else {
++            throw JellyfinError.message("The server returned a page instead of a ROM file.")
++        }
++        let rawName = item.fileName.isEmpty ? (response.suggestedFilename ?? "") : item.fileName
++        let name = rawName.replacingOccurrences(of: "\\", with: "/").components(separatedBy: "/").last ?? ""
++        guard !name.isEmpty, name != ".", name != "..", !name.contains(":"), !name.contains("\0") else {
++            throw JellyfinError.message("Jellyfin did not provide a usable ROM filename.")
++        }
++        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Jellyfin-\(UUID().uuidString)", isDirectory: true)
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        let destination = directory.appendingPathComponent(name)
++        do { try FileManager.default.moveItem(at: temporary, to: destination) }
++        catch { try? FileManager.default.removeItem(at: directory); throw error }
++        return destination
++    }
++
++    func signOut() async {
++        guard let request = try? request(["Sessions", "Logout"], method: "POST") else { return }
++        _ = try? await session.data(for: request)
++    }
++}
+diff --git a/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift b/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift
+new file mode 100644
+index 0000000..c87196d
+--- /dev/null
++++ b/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift
+@@ -0,0 +1,374 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++import UIKit
++import Security
++
++private enum JellyfinAccountStore {
++    private static var key: [String: Any] {
++        [kSecClass as String: kSecClassGenericPassword,
++         kSecAttrService as String: (Bundle.main.bundleIdentifier ?? "ManicEMU") + ".jellyfin",
++         kSecAttrAccount as String: "current-account"]
++    }
++
++    static func load() -> JellyfinAccount? {
++        var query = key
++        query[kSecReturnData as String] = true
++        var result: CFTypeRef?
++        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
++              let data = result as? Data else { return nil }
++        return try? JSONDecoder().decode(JellyfinAccount.self, from: data)
++    }
++
++    static func save(_ account: JellyfinAccount) throws {
++        let data = try JSONEncoder().encode(account)
++        var query = key
++        query[kSecValueData as String] = data
++        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
++        let status = SecItemAdd(query as CFDictionary, nil)
++        if status == errSecDuplicateItem {
++            guard SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecSuccess else {
++                throw JellyfinError.message("Could not save your Jellyfin sign-in securely.")
++            }
++        } else if status != errSecSuccess {
++            throw JellyfinError.message("Could not save your Jellyfin sign-in securely.")
++        }
++    }
++
++    static func clear() throws {
++        let status = SecItemDelete(key as CFDictionary)
++        guard status == errSecSuccess || status == errSecItemNotFound else {
++            throw JellyfinError.message("Could not remove your saved sign-in. Please try again.")
++        }
++    }
++}
++
++@MainActor
++final class JellyfinViewController: UITableViewController, UISearchResultsUpdating {
++    private var client: JellyfinClient?
++    private var library: JellyfinItem?
++    private var items: [JellyfinItem] = []
++    private var offset = 0
++    private var hasMore = false
++    private var loading = false
++    private var generation = UUID()
++    private var operation: Task<Void, Never>?
++    private var searchTask: Task<Void, Never>?
++    private var coverTasks: [String: Task<Void, Never>] = [:]
++    private let covers = NSCache<NSString, UIImage>()
++    private var downloading = false
++    private var importing = false
++    private let search = UISearchController(searchResultsController: nil)
++
++    init() { super.init(style: .insetGrouped) }
++    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        title = "Jellyfin"
++        covers.countLimit = 150
++        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "item")
++        tableView.rowHeight = 76
++        search.searchResultsUpdater = self
++        search.obscuresBackgroundDuringPresentation = false
++        search.searchBar.placeholder = "Search games"
++        definesPresentationContext = true
++        refreshControl = UIRefreshControl()
++        refreshControl?.addTarget(self, action: #selector(reload), for: .valueChanged)
++        if let account = JellyfinAccountStore.load() { client = JellyfinClient(account: account) }
++        updateButtons()
++        if client != nil { reload() }
++        else { status("Sign in to browse your Jellyfin game libraries.") }
++    }
++
++    override func viewDidAppear(_ animated: Bool) {
++        super.viewDidAppear(animated)
++        if client == nil && presentedViewController == nil { login() }
++    }
++
++    private func updateButtons() {
++        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(close))
++        if client == nil {
++            navigationItem.rightBarButtonItems = [UIBarButtonItem(title: "Sign In", style: .plain, target: self, action: #selector(login))]
++        } else {
++            navigationItem.rightBarButtonItems = [
++                UIBarButtonItem(title: "Sign Out", style: .plain, target: self, action: #selector(logout)),
++                UIBarButtonItem(title: "Libraries", style: .plain, target: self, action: #selector(showLibraries))
++            ]
++        }
++    }
++
++    private func status(_ text: String?) {
++        let label = UILabel()
++        label.text = text
++        label.numberOfLines = 0
++        label.textAlignment = .center
++        label.textColor = .secondaryLabel
++        label.font = .preferredFont(forTextStyle: .body)
++        label.adjustsFontForContentSizeCategory = true
++        tableView.backgroundView = text == nil ? nil : label
++    }
++
++    private func showError(_ error: Error) {
++        guard !(error is CancellationError), (error as? URLError)?.code != .cancelled else { return }
++        let alert = UIAlertController(title: "Jellyfin", message: error.localizedDescription, preferredStyle: .alert)
++        alert.addAction(UIAlertAction(title: "OK", style: .default))
++        present(alert, animated: true)
++    }
++
++    @objc private func login() {
++        guard !loading else { return }
++        let alert = UIAlertController(title: "Sign in to Jellyfin", message: "Enter the server address, including any /jellyfin base path. Use HTTPS when connecting over the internet.", preferredStyle: .alert)
++        alert.addTextField { field in
++            field.placeholder = "https://media.example.com"
++            field.keyboardType = .URL
++            field.autocapitalizationType = .none
++            field.autocorrectionType = .no
++            field.text = UserDefaults.standard.string(forKey: "jellyfin.lastServer")
++        }
++        alert.addTextField { field in
++            field.placeholder = "Username"
++            field.textContentType = .username
++            field.autocapitalizationType = .none
++            field.autocorrectionType = .no
++        }
++        alert.addTextField { field in
++            field.placeholder = "Password"
++            field.textContentType = .password
++            field.isSecureTextEntry = true
++        }
++        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
++        alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak self, weak alert] _ in
++            guard let self, let fields = alert?.textFields else { return }
++            let address = fields[0].text ?? ""
++            let username = fields[1].text ?? ""
++            let password = fields[2].text ?? ""
++            fields[2].text = nil
++            self.loading = true
++            self.status("Signing in…")
++            self.operation = Task {
++                do {
++                    guard !username.isEmpty else { throw JellyfinError.message("Enter your Jellyfin username.") }
++                    let server = try JellyfinClient.serverURL(address)
++                    let account = try await JellyfinClient.signIn(server: server, username: username, password: password)
++                    try Task.checkCancellation()
++                    try JellyfinAccountStore.save(account)
++                    UserDefaults.standard.set(server.absoluteString, forKey: "jellyfin.lastServer")
++                    self.client = JellyfinClient(account: account)
++                    self.loading = false
++                    self.updateButtons()
++                    self.reload()
++                } catch {
++                    self.loading = false
++                    self.status("Sign-in did not finish. Tap Sign In to try again.")
++                    self.showError(error)
++                }
++            }
++        })
++        present(alert, animated: true)
++    }
++
++    @objc private func close() {
++        guard !importing else { return }
++        operation?.cancel()
++        searchTask?.cancel()
++        coverTasks.values.forEach { $0.cancel() }
++        dismiss(animated: true)
++    }
++
++    @objc private func logout() {
++        guard !downloading, !importing else { return }
++        do { try JellyfinAccountStore.clear() } catch { showError(error); return }
++        let previous = client
++        operation?.cancel()
++        searchTask?.cancel()
++        generation = UUID()
++        coverTasks.values.forEach { $0.cancel() }
++        coverTasks.removeAll()
++        covers.removeAllObjects()
++        client = nil
++        library = nil
++        items = []
++        loading = false
++        hasMore = false
++        navigationItem.searchController = nil
++        title = "Jellyfin"
++        tableView.reloadData()
++        updateButtons()
++        status("Signed out. Tap Sign In to connect.")
++        Task { await previous?.signOut() }
++    }
++
++    @objc private func showLibraries() {
++        guard !downloading, !importing else { return }
++        library = nil
++        navigationItem.searchController = nil
++        search.searchBar.text = ""
++        title = "Jellyfin"
++        reload()
++    }
++
++    @objc private func reload() {
++        guard let client, !downloading, !importing else { refreshControl?.endRefreshing(); return }
++        operation?.cancel()
++        generation = UUID()
++        let current = generation
++        offset = 0
++        items = []
++        hasMore = false
++        loading = true
++        tableView.reloadData()
++        status("Loading…")
++        operation = Task {
++            do {
++                if let library = self.library {
++                    let page = try await client.items(parentID: library.Id, start: 0, search: search.searchBar.text ?? "")
++                    guard current == generation else { return }
++                    append(page)
++                } else {
++                    let result = try await client.libraries()
++                    guard current == generation else { return }
++                    items = result
++                }
++                finishLoading()
++            } catch {
++                guard current == generation else { return }
++                finishLoading()
++                status("Could not load the library. Pull down to retry.")
++                showError(error)
++            }
++        }
++    }
++
++    private func append(_ page: JellyfinPage) {
++        offset += page.Items.count
++        let known = Set(items.map(\.Id))
++        items += page.Items.filter {
++            guard !known.contains($0.Id), $0.IsFolder != true else { return false }
++            // Some servers hide paths. Keep those items so the download response can identify them.
++            if $0.fileName.isEmpty { return true }
++            let ext = ($0.fileName as NSString).pathExtension.lowercased()
++            guard let type = FileType(fileExtension: ext) else { return false }
++            return type == .game || type == .zip
++        }
++        hasMore = !page.Items.isEmpty && offset < (page.TotalRecordCount ?? (offset + (page.Items.count == 100 ? 1 : 0)))
++    }
++
++    private func finishLoading() {
++        loading = false
++        refreshControl?.endRefreshing()
++        tableView.reloadData()
++        status(items.isEmpty && !hasMore ? (library == nil ? "No libraries are available to this account." : "No games found. Jellyfin must index your ROMs as library items; a server folder alone is not enough. Also check your search and account permissions.") : nil)
++    }
++
++    func updateSearchResults(for searchController: UISearchController) {
++        guard library != nil, !downloading, !importing else { return }
++        searchTask?.cancel()
++        searchTask = Task {
++            do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
++            reload()
++        }
++    }
++
++    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
++        items.count + (hasMore ? 1 : 0)
++    }
++
++    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
++        let cell = tableView.dequeueReusableCell(withIdentifier: "item", for: indexPath)
++        var content = cell.defaultContentConfiguration()
++        cell.accessoryType = .none
++        if indexPath.row == items.count {
++            content.text = loading ? "Loading…" : "Load more"
++        } else {
++            let item = items[indexPath.row]
++            content.text = item.Name
++            content.secondaryText = library == nil ? "Browse library" : item.fileName
++            content.image = covers.object(forKey: item.Id as NSString) ?? UIImage(systemName: library == nil ? "folder" : "gamecontroller")
++            content.imageProperties.maximumSize = CGSize(width: 48, height: 60)
++            cell.accessoryType = library == nil ? .disclosureIndicator : .none
++            if item.ImageTags?["Primary"] != nil, covers.object(forKey: item.Id as NSString) == nil,
++               coverTasks[item.Id] == nil, let client {
++                coverTasks[item.Id] = Task { [weak self] in
++                    guard let data = try? await client.cover(item), !Task.isCancelled,
++                          let image = UIImage(data: data), let self else { return }
++                    self.covers.setObject(image, forKey: item.Id as NSString)
++                    if let row = self.items.firstIndex(where: { $0.Id == item.Id }) {
++                        self.tableView.reloadRows(at: [IndexPath(row: row, section: 0)], with: .none)
++                    }
++                }
++            }
++        }
++        cell.contentConfiguration = content
++        return cell
++    }
++
++    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
++        tableView.deselectRow(at: indexPath, animated: true)
++        guard !loading, !downloading, !importing, let client else { return }
++        if indexPath.row == items.count {
++            guard let library else { return }
++            loading = true
++            let current = generation
++            operation = Task {
++                do {
++                    let page = try await client.items(parentID: library.Id, start: offset, search: search.searchBar.text ?? "")
++                    guard current == generation else { return }
++                    append(page)
++                    finishLoading()
++                } catch {
++                    guard current == generation else { return }
++                    finishLoading()
++                    showError(error)
++                }
++            }
++            tableView.reloadData()
++            return
++        }
++        let item = items[indexPath.row]
++        if library == nil {
++            library = item
++            title = item.Name
++            navigationItem.searchController = search
++            reload()
++        } else {
++            download(item, client: client)
++        }
++    }
++
++    private func download(_ item: JellyfinItem, client: JellyfinClient) {
++        searchTask?.cancel()
++        downloading = true
++        isModalInPresentation = true
++        let progress = UIAlertController(title: "Downloading \(item.Name)", message: "Keep ManicEMU open. The game will be added to your local library when the download finishes.", preferredStyle: .alert)
++        progress.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in self?.operation?.cancel() })
++        present(progress, animated: true)
++        operation = Task {
++            do {
++                let url = try await client.download(item)
++                let directory = url.deletingLastPathComponent()
++                if Task.isCancelled {
++                    try? FileManager.default.removeItem(at: directory)
++                    throw CancellationError()
++                }
++                guard let type = FileType(fileExtension: url.pathExtension.lowercased()), type == .game || type == .zip else {
++                    try? FileManager.default.removeItem(at: directory)
++                    throw JellyfinError.message("This item is not a supported ROM or archive. Select a game file; multi-file games need an archive containing all their files.")
++                }
++                downloading = false
++                importing = true
++                progress.dismiss(animated: true) {
++                    FilesImporter.importFiles(urls: [url], importCompletion: { [weak self] in
++                        try? FileManager.default.removeItem(at: directory)
++                        self?.importing = false
++                        self?.isModalInPresentation = false
++                    })
++                }
++            } catch {
++                downloading = false
++                isModalInPresentation = false
++                if presentedViewController === progress {
++                    progress.dismiss(animated: true) { self.showError(error) }
++                } else { showError(error) }
++            }
++        }
++    }
++}
+diff --git a/ManicEmu/ManicEmu/Sources/Business/Import/Views/AddImportServiceView.swift b/ManicEmu/ManicEmu/Sources/Business/Import/Views/AddImportServiceView.swift
+index 69e8b52..183def9 100644
+--- a/ManicEmu/ManicEmu/Sources/Business/Import/Views/AddImportServiceView.swift
++++ b/ManicEmu/ManicEmu/Sources/Business/Import/Views/AddImportServiceView.swift
+@@ -25,6 +25,10 @@ class AddImportServiceView: BaseView {
+         sections.append(.init(cells: LanServices.map({ ASListPage.Cell.iconTitleChevronCell(icon: .image($0.iconImage), title: $0.title) }),
+                               header: .defaultHeader(title: R.string.localizable.importAddLanServiceTitle()),
+                               decoration: .init(style: .primary)))
++
++        sections.append(.init(cells: [ASListPage.Cell.iconTitleChevronCell(icon: .image(UIImage(systemName: "server.rack")!), title: "Jellyfin")],
++                              header: .defaultHeader(title: "Game libraries"),
++                              decoration: .init(style: .primary)))
+         
+         let view = ASListPageView(.init(navigation: navigation,
+                                         sections: sections,
+@@ -50,6 +54,12 @@ class AddImportServiceView: BaseView {
+                         guard let self = self else { return }
+                         self.requireToHideSideMenu?()
+                     })
++                } else if indexPath.section == 2 {
++                    let browser = UINavigationController(rootViewController: JellyfinViewController())
++                    browser.modalPresentationStyle = .formSheet
++                    // Use explicit Close so in-flight requests are always cancelled.
++                    browser.isModalInPresentation = true
++                    topViewController()?.present(browser, animated: true)
+                 }
+             }
+             
+diff --git a/Package.swift b/Package.swift
+new file mode 100644
+index 0000000..c466058
+--- /dev/null
++++ b/Package.swift
+@@ -0,0 +1,14 @@
++// swift-tools-version: 5.9
++import PackageDescription
++
++// Focused tests for the Foundation-only Jellyfin client; the iOS app still builds in Xcode.
++let package = Package(
++    name: "ManicJellyfin",
++    platforms: [.macOS(.v12)],
++    products: [.library(name: "ManicJellyfin", targets: ["ManicJellyfin"])],
++    targets: [
++        .target(name: "ManicJellyfin", path: "ManicEmu/ManicEmu/Sources/Business/Import/Models",
++                exclude: ["ImportService.swift", "SMBServiceProvider.swift", "WebDavServiceProvider.swift"], sources: ["JellyfinClient.swift"]),
++        .testTarget(name: "ManicJellyfinTests", dependencies: ["ManicJellyfin"], path: "Tests/Jellyfin")
++    ]
++)
+diff --git a/Tests/Jellyfin/JellyfinClientTests.swift b/Tests/Jellyfin/JellyfinClientTests.swift
+new file mode 100644
+index 0000000..9c807a2
+--- /dev/null
++++ b/Tests/Jellyfin/JellyfinClientTests.swift
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++import XCTest
++@testable import ManicJellyfin
++
++private final class StubProtocol: URLProtocol {
++    static var respond: ((URLRequest) throws -> (Int, String))?
++    override class func canInit(with request: URLRequest) -> Bool { true }
++    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
++    override func startLoading() {
++        do {
++            let (code, body) = try Self.respond!(request)
++            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: code,
++                httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
++            client?.urlProtocol(self, didLoad: Data(body.utf8))
++            client?.urlProtocolDidFinishLoading(self)
++        } catch { client?.urlProtocol(self, didFailWithError: error) }
++    }
++    override func stopLoading() {}
++}
++
++final class JellyfinClientTests: XCTestCase {
++    private func client() -> JellyfinClient {
++        let config = URLSessionConfiguration.ephemeral
++        config.protocolClasses = [StubProtocol.self]
++        return JellyfinClient(account: .init(server: URL(string: "https://example.com/jellyfin/")!,
++            userID: "user", token: "secret", deviceID: "device"), session: URLSession(configuration: config))
++    }
++
++    override func tearDown() { StubProtocol.respond = nil; super.tearDown() }
++
++    func testServerValidation() throws {
++        XCTAssertEqual(try JellyfinClient.serverURL(" http://192.168.1.10:8096 ").port, 8096)
++        for invalid in ["media.example.com", "file:///etc/passwd", "https://u:p@example.com", "https://example.com?api_key=secret", "https://example.com/#/home"] {
++            XCTAssertThrowsError(try JellyfinClient.serverURL(invalid))
++        }
++    }
++
++    func testBasePathAndHeaderAuthentication() throws {
++        let request = try client().request(["Items", "abc", "Download"])
++        XCTAssertEqual(request.url?.path, "/jellyfin/Items/abc/Download")
++        XCTAssertNil(request.url?.query)
++        XCTAssertTrue(request.value(forHTTPHeaderField: "Authorization")!.contains("Token=\"secret\""))
++    }
++
++    func testQueryEncodingAndPagination() async throws {
++        StubProtocol.respond = { request in
++            let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
++            let query = Dictionary(uniqueKeysWithValues: parts.queryItems!.map { ($0.name, $0.value!) })
++            XCTAssertEqual(query["searchTerm"], "Mario & Luigi")
++            XCTAssertEqual(query["startIndex"], "100")
++            XCTAssertEqual(query["userId"], "user")
++            XCTAssertEqual(query["parentId"], "games")
++            XCTAssertEqual(query["filters"], "IsNotFolder")
++            return (200, #"{"Items":[{"Id":"game","Name":"Mario","Path":"C:\\ROMs\\Mario.nds"}],"TotalRecordCount":101}"#)
++        }
++        let page = try await client().items(parentID: "games", start: 100, search: "Mario & Luigi")
++        XCTAssertEqual(page.TotalRecordCount, 101)
++        XCTAssertEqual(page.Items.first?.fileName, "Mario.nds")
++    }
++
++    func testMissingOptionalMetadata() throws {
++        let page = try JSONDecoder().decode(JellyfinPage.self, from: Data(#"{"Items":[{"Id":"1","Name":"Game"}]}"#.utf8))
++        XCTAssertEqual(page.Items[0].fileName, "")
++        XCTAssertNil(page.TotalRecordCount)
++    }
++
++    func testOlderLibraryEndpointFallback() async throws {
++        var paths: [String] = []
++        StubProtocol.respond = { request in
++            paths.append(request.url!.path)
++            if paths.count == 1 { return (404, "") }
++            return (200, #"{"Items":[{"Id":"games","Name":"Games","IsFolder":true}]}"#)
++        }
++        let libraries = try await client().libraries()
++        XCTAssertEqual(paths, ["/jellyfin/UserViews", "/jellyfin/Users/user/Views"])
++        XCTAssertEqual(libraries.first?.Name, "Games")
++    }
++
++    func testUnauthorizedDoesNotFallback() async {
++        var count = 0
++        StubProtocol.respond = { _ in count += 1; return (401, "") }
++        do { _ = try await client().libraries(); XCTFail("Expected authentication error") }
++        catch JellyfinError.http(401) { }
++        catch { XCTFail("Unexpected error: \(error)") }
++        XCTAssertEqual(count, 1)
++    }
++
++    func testForbiddenDownloadMessage() {
++        XCTAssertTrue(JellyfinError.http(403).localizedDescription.contains("permission"))
++    }
++
++    func testCrossOriginRedirectIsRejected() {
++        let session = URLSession(configuration: .ephemeral)
++        defer { session.invalidateAndCancel() }
++        let original = URL(string: "https://example.com/jellyfin/Items")!
++        let task = session.dataTask(with: original)
++        let response = HTTPURLResponse(url: original, statusCode: 302, httpVersion: nil, headerFields: nil)!
++        JellyfinRedirectGuard().urlSession(session, task: task, willPerformHTTPRedirection: response,
++            newRequest: URLRequest(url: URL(string: "https://other.example/collect")!)) { request in
++                XCTAssertNil(request)
++            }
++        task.cancel()
++    }
++}
