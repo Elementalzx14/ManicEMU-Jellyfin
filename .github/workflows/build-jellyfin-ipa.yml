@@ -1,0 +1,74 @@
+name: Build Jellyfin iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Apply Jellyfin integration
+        run: git apply --check ManicEMU-Jellyfin.patch && git apply ManicEMU-Jellyfin.patch
+      - name: Select available Xcode 26 or newer
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, subprocess
+          candidates = []
+          for path in glob.glob('/Applications/Xcode*.app/Contents/Developer'):
+              env = dict(os.environ, DEVELOPER_DIR=path)
+              version = subprocess.check_output(['xcodebuild', '-version'], env=env, text=True)
+              match = re.search(r'Xcode (\d+(?:\.\d+)*)', version)
+              if match:
+                  parts = tuple(map(int, match[1].split('.')))
+                  if parts[0] >= 26:
+                      candidates.append((parts, path))
+          if not candidates:
+              raise SystemExit('This runner has no Xcode 26+. Select a newer macOS runner.')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('DEVELOPER_DIR=' + max(candidates)[1] + '\n')
+          PY
+      - name: Test Jellyfin client
+        run: swift test
+      - name: Fetch emulator dependencies
+        run: |
+          git lfs install --local
+          git lfs pull
+          git submodule update --init --recursive
+          git submodule foreach --recursive 'git lfs pull'
+      - name: Install Boost
+        run: brew list boost >/dev/null 2>&1 || brew install boost
+      - name: Archive unsigned iOS app
+        run: |
+          set -o pipefail
+          xcodebuild -project ManicEmu/ManicEmu.xcodeproj \
+            -scheme ManicEmuSideload -configuration SideloadRelease \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/ManicEMU.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            archive 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/ManicEMU.xcarchive/Products/Applications/"*.app "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$RUNNER_TEMP/ManicEMU-Jellyfin-unsigned.ipa"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ManicEMU-Jellyfin-unsigned
+          path: ${{ runner.temp }}/ManicEMU-Jellyfin-unsigned.ipa
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iOS-build-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
