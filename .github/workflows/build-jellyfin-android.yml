@@ -44,6 +44,34 @@ jobs:
                   assert data[:4] == b'\x7fELF', core
               assert 'classes.dex' in z.namelist()
           PY
+      - name: Allow the runner to use Android virtualization
+        run: sudo setfacl -m u:"$USER":rw /dev/kvm
+      - name: Launch APK on Android 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disk-size: 4096M
+          script: |
+            adb install android/lemuroid-app/build/outputs/apk/freeBundle/debug/*.apk
+            adb shell am start -W -n com.elementalzx14.jellyfingames.debug/com.swordfish.lemuroid.app.jellyfin.JellyfinActivity
+            sleep 8
+            adb shell uiautomator dump /sdcard/window.xml
+            adb pull /sdcard/window.xml android-window.xml
+            python3 -c 'import xml.etree.ElementTree as E; r=E.parse("android-window.xml"); assert any(n.get("text")=="Jellyfin Games" for n in r.iter("node")); assert any(n.get("text")=="Sign in" for n in r.iter("node"))'
+            adb shell screencap -p /sdcard/jellyfin.png
+            adb pull /sdcard/jellyfin.png android-jellyfin.png
+            adb logcat -d -s AndroidRuntime:E > android-runtime.log
+            if grep -q "FATAL EXCEPTION" android-runtime.log; then cat android-runtime.log; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-launch-check
+          path: |
+            android-window.xml
+            android-jellyfin.png
+            android-runtime.log
       - uses: actions/upload-artifact@v4
         with:
           name: Jellyfin-Games-Android
