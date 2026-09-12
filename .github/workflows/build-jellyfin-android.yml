@@ -1,0 +1,57 @@
+name: Build Jellyfin Android APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out Android emulator
+        uses: actions/checkout@v4
+        with:
+          repository: Swordfish90/Lemuroid
+          ref: 53752bf29bc3f95c50f6c38f70cd4a53450a7098
+          path: android
+          submodules: recursive
+          persist-credentials: false
+      - name: Apply Jellyfin Android integration
+        working-directory: android
+        run: git apply --check ../Jellyfin-Android.patch && git apply ../Jellyfin-Android.patch
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and test APK with bundled emulator cores
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :lemuroid-app:testFreeBundleDebugUnitTest :lemuroid-app:assembleFreeBundleDebug --stacktrace
+      - name: Verify bundled cores and APK
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile
+          apk = glob.glob('android/lemuroid-app/build/outputs/apk/freeBundle/debug/*.apk')
+          assert len(apk) == 1, apk
+          with zipfile.ZipFile(apk[0]) as z:
+              for core in ['fceumm', 'snes9x', 'mgba', 'pcsx_rearmed', 'ppsspp']:
+                  data = z.read('lib/arm64-v8a/lib' + core + '_libretro_android.so')
+                  assert data[:4] == b'\x7fELF', core
+              assert 'classes.dex' in z.namelist()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jellyfin-Games-Android
+          path: android/lemuroid-app/build/outputs/apk/freeBundle/debug/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-test-results
+          path: android/lemuroid-app/build/reports/tests/
+          if-no-files-found: ignore
