@@ -53,7 +53,7 @@ index ed9b150..1f6d6e6 100644
              android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|layoutDirection|locale|mcc|navigation|smallestScreenSize|touchscreen|uiMode"
 diff --git a/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java
 new file mode 100644
-index 0000000..45ff388
+index 0000000..900f81a
 --- /dev/null
 +++ b/lemuroid-app/src/main/java/com/swordfish/lemuroid/app/jellyfin/JellyfinActivity.java
 @@ -0,0 +1,212 @@
@@ -114,14 +114,14 @@ index 0000000..45ff388
 +        LinearLayout nav = new LinearLayout(this);
 +        back = button("Back", nav, v -> up()); libraries = button("Libraries", nav, v -> { if (!downloading) { folders.clear(); search.setText(""); load(false); } });
 +        sign = button("Sign in", nav, v -> { if (!downloading) { if (account == null) login(); else logout(); } }); root.addView(nav);
-+        Button local = new Button(this); local.setText("Downloaded games â€¢ Play"); local.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class))); root.addView(local);
++        Button local = new Button(this); local.setText("Downloaded games - Play"); local.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class))); root.addView(local);
 +        searchRow = new LinearLayout(this);
 +        search = new EditText(this); search.setSingleLine(true); search.setTextColor(Color.WHITE); search.setHintTextColor(Color.LTGRAY); search.setHint("Search this folder");
 +        searchRow.addView(search, new LinearLayout.LayoutParams(0, -2, 1)); button("Search", searchRow, v -> { if (!downloading) load(false); }); root.addView(searchRow);
 +        message = text("", 15); root.addView(message);
 +        list = new ListView(this); list.setDividerHeight(1); root.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
 +        loadMore = new Button(this); loadMore.setText("Load more"); loadMore.setOnClickListener(v -> { if (!busy) load(true); }); root.addView(loadMore);
-+        TextView credit = text("Built on Lemuroid â€¢ GPLv3 â€¢ About & source", 12);
++        TextView credit = text("Built on Lemuroid | GPLv3 | About & source", 12);
 +        credit.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Jellyfin Games for Android")
 +            .setMessage("An unofficial Jellyfin integration built on Lemuroid and LibretroDroid. Original authors and licenses are retained. Console support follows Lemuroid, not ManicEMU. No games or BIOS files are included. Downloads play locally; saves are not synchronized with Jellyfin.")
 +            .setPositiveButton("Source code", (d,w) -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Elementalzx14/ManicEMU-Jellyfin"))))
@@ -137,7 +137,7 @@ index 0000000..45ff388
 +                ImageView image = new ImageView(JellyfinActivity.this); image.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(image, new LinearLayout.LayoutParams(60, 76));
 +                image.setImageResource(folder ? android.R.drawable.ic_menu_agenda : android.R.drawable.ic_media_play);
 +                LinearLayout labels = new LinearLayout(JellyfinActivity.this); labels.setOrientation(LinearLayout.VERTICAL); labels.setPadding(16,0,0,0);
-+                labels.addView(text(item.optString("Name"), 18)); labels.addView(text(folder ? "Open folder â€º" : JellyfinApi.filename(item), 12));
++                labels.addView(text(item.optString("Name"), 18)); labels.addView(text(folder ? "Open folder  " : JellyfinApi.filename(item), 12));
 +                row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1)); cover(item, image); return row;
 +            }
 +        };
@@ -168,7 +168,7 @@ index 0000000..45ff388
 +        if (account == null || downloading) return;
 +        cancel(); int current = generation; busy = true;
 +        if (!next) { rows.clear(); offset = 0; more = false; }
-+        adapter.notifyDataSetChanged(); message.setText("Loadingâ€¦"); update();
++        adapter.notifyDataSetChanged(); message.setText("Loading "); update();
 +        JellyfinApi call = api(); operation = call;
 +        String parent = folders.isEmpty() ? null : folders.get(folders.size()-1).optString("Id"); String term = search.getText().toString(); int start = offset;
 +        worker.execute(() -> {
@@ -199,7 +199,7 @@ index 0000000..45ff388
 +        new AlertDialog.Builder(this).setTitle("Sign in to Jellyfin").setMessage("Include any /jellyfin server base path. Use HTTPS outside your home network.").setView(form)
 +            .setNegativeButton("Cancel",null).setPositiveButton("Sign in",(d,w) -> {
 +                String address = server.getText().toString(), username = user.getText().toString(), secret = password.getText().toString(); password.setText("");
-+                cancel(); int current = generation; busy=true; update(); message.setText("Signing inâ€¦");
++                cancel(); int current = generation; busy=true; update(); message.setText("Signing in ");
 +                worker.execute(() -> { try {
 +                    String base = JellyfinApi.validateServer(address), device = UUID.randomUUID().toString();
 +                    JellyfinApi call = new JellyfinApi(base,"","",device); operation=call;
@@ -232,7 +232,7 @@ index 0000000..45ff388
 +        } catch(Exception e) {busy=false;downloading=false;update();error(e);return;}
 +        File destination=root;
 +        AlertDialog progress=new AlertDialog.Builder(this).setTitle("Downloading "+item.optString("Name")).setMessage("Keep this app open. Large games can take several minutes.")
-+            .setNegativeButton("Cancel",(d,w)->{call.cancel();message.setText("Cancelling downloadâ€¦");}).setCancelable(false).create(); progress.show();
++            .setNegativeButton("Cancel",(d,w)->{call.cancel();message.setText("Cancelling download ");}).setCancelable(false).create(); progress.show();
 +        worker.execute(() -> {try {
 +            call.download(item,destination);
 +            LibraryIndexScheduler.INSTANCE.scheduleLibrarySync(getApplicationContext());
