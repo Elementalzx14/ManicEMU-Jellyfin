@@ -68,7 +68,7 @@ index 0000000..8261fc1
 +          if-no-files-found: ignore
 diff --git a/JELLYFIN.md b/JELLYFIN.md
 new file mode 100644
-index 0000000..f307f24
+index 0000000..1de63fb
 --- /dev/null
 +++ b/JELLYFIN.md
 @@ -0,0 +1,55 @@
@@ -78,7 +78,7 @@ index 0000000..f307f24
 +
 +## Using it
 +
-+Open **Import â†’ Add service â†’ Game libraries â†’ Jellyfin**. Enter your server's full URL (including a reverse-proxy base path if applicable), username, and password. Select the library containing your games. Search or browse covers, select a game, and keep the app open while it downloads. ManicEMU's existing importer then adds it to the local Games library, where you can launch it.
++Open **Import Ã¢â€ â€™ Add service Ã¢â€ â€™ Game libraries Ã¢â€ â€™ Jellyfin**. Enter your server's full URL (including a reverse-proxy base path if applicable), username, and password. Select the library containing your games. Open console folders such as NES or Super Nintendo, then select a game. Back moves to the parent folder; Libraries returns to the library list. Search finds games in the current folder and its subfolders. Browse covers, select a game, and keep the app open while it downloads. ManicEMU's existing importer then adds it to the local Games library, where you can launch it.
 +
 +The sideload build enables access to import services through the upstream SIDE_LOAD configuration. Reopen the same Jellyfin entry to return to the saved account. The first version supports one account at a time; use Sign Out to switch servers or users.
 +
@@ -283,10 +283,10 @@ index 9316213..2c7c6f6 100644
  			<key>baidu.com</key>
 diff --git a/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift b/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift
 new file mode 100644
-index 0000000..227ca50
+index 0000000..f87bf5f
 --- /dev/null
 +++ b/ManicEmu/ManicEmu/Sources/Business/Import/Models/JellyfinClient.swift
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,201 @@
 +// SPDX-License-Identifier: AGPL-3.0-or-later
 +import Foundation
 +
@@ -432,19 +432,22 @@ index 0000000..227ca50
 +    }
 +
 +    func items(parentID: String, start: Int, search: String) async throws -> JellyfinPage {
-+        try await decode(request(["Items"], query: [
++        let term = search.trimmingCharacters(in: .whitespacesAndNewlines)
++        let searching = !term.isEmpty
++        var query: [URLQueryItem] = [
 +            .init(name: "userId", value: account.userID),
 +            .init(name: "parentId", value: parentID),
-+            .init(name: "recursive", value: "true"),
-+            .init(name: "filters", value: "IsNotFolder"),
++            .init(name: "recursive", value: searching ? "true" : "false"),
 +            .init(name: "fields", value: "Path"),
-+            .init(name: "sortBy", value: "SortName"),
-+            .init(name: "sortOrder", value: "Ascending"),
++            .init(name: "sortBy", value: searching ? "SortName" : "IsFolder,SortName"),
++            .init(name: "sortOrder", value: searching ? "Ascending" : "Descending,Ascending"),
 +            .init(name: "startIndex", value: String(start)),
 +            .init(name: "limit", value: "100"),
 +            .init(name: "enableTotalRecordCount", value: "true"),
-+            .init(name: "searchTerm", value: search)
-+        ]))
++            .init(name: "searchTerm", value: term)
++        ]
++        if searching { query.append(.init(name: "filters", value: "IsNotFolder")) }
++        return try await decode(request(["Items"], query: query))
 +    }
 +
 +    func cover(_ item: JellyfinItem) async throws -> Data {
@@ -487,10 +490,10 @@ index 0000000..227ca50
 +}
 diff --git a/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift b/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift
 new file mode 100644
-index 0000000..c87196d
+index 0000000..449b5fd
 --- /dev/null
 +++ b/ManicEmu/ManicEmu/Sources/Business/Import/ViewControllers/JellyfinViewController.swift
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,402 @@
 +// SPDX-License-Identifier: AGPL-3.0-or-later
 +import UIKit
 +import Security
@@ -537,7 +540,8 @@ index 0000000..c87196d
 +@MainActor
 +final class JellyfinViewController: UITableViewController, UISearchResultsUpdating {
 +    private var client: JellyfinClient?
-+    private var library: JellyfinItem?
++    private var folderPath: [JellyfinItem] = []
++    private var library: JellyfinItem? { folderPath.last }
 +    private var items: [JellyfinItem] = []
 +    private var offset = 0
 +    private var hasMore = false
@@ -578,7 +582,11 @@ index 0000000..c87196d
 +    }
 +
 +    private func updateButtons() {
-+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(close))
++        var leftButtons = [UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(close))]
++        if !folderPath.isEmpty {
++            leftButtons.append(UIBarButtonItem(title: "Back", style: .plain, target: self, action: #selector(goBack)))
++        }
++        navigationItem.leftBarButtonItems = leftButtons
 +        if client == nil {
 +            navigationItem.rightBarButtonItems = [UIBarButtonItem(title: "Sign In", style: .plain, target: self, action: #selector(login))]
 +        } else {
@@ -636,7 +644,7 @@ index 0000000..c87196d
 +            let password = fields[2].text ?? ""
 +            fields[2].text = nil
 +            self.loading = true
-+            self.status("Signing in…")
++            self.status("Signing inâ€¦")
 +            self.operation = Task {
 +                do {
 +                    guard !username.isEmpty else { throw JellyfinError.message("Enter your Jellyfin username.") }
@@ -678,12 +686,13 @@ index 0000000..c87196d
 +        coverTasks.removeAll()
 +        covers.removeAllObjects()
 +        client = nil
-+        library = nil
++        folderPath.removeAll()
 +        items = []
 +        loading = false
 +        hasMore = false
 +        navigationItem.searchController = nil
 +        title = "Jellyfin"
++        navigationItem.prompt = nil
 +        tableView.reloadData()
 +        updateButtons()
 +        status("Signed out. Tap Sign In to connect.")
@@ -692,10 +701,32 @@ index 0000000..c87196d
 +
 +    @objc private func showLibraries() {
 +        guard !downloading, !importing else { return }
-+        library = nil
++        folderPath.removeAll()
 +        navigationItem.searchController = nil
 +        search.searchBar.text = ""
 +        title = "Jellyfin"
++        navigationItem.prompt = nil
++        searchTask?.cancel()
++        search.isActive = false
++        updateButtons()
++        reload()
++    }
++
++    @objc private func goBack() {
++        guard !downloading, !importing, !folderPath.isEmpty else { return }
++        folderPath.removeLast()
++        updateFolder()
++    }
++
++    private func updateFolder() {
++        searchTask?.cancel()
++        search.isActive = false
++        search.searchBar.text = ""
++        navigationItem.searchController = library == nil ? nil : search
++        search.searchBar.placeholder = "Search this folder and subfolders"
++        title = library?.Name ?? "Jellyfin"
++        navigationItem.prompt = folderPath.count > 1 ? folderPath.dropLast().map(\.Name).joined(separator: " / ") : nil
++        updateButtons()
 +        reload()
 +    }
 +
@@ -709,7 +740,7 @@ index 0000000..c87196d
 +        hasMore = false
 +        loading = true
 +        tableView.reloadData()
-+        status("Loading…")
++        status("Loadingâ€¦")
 +        operation = Task {
 +            do {
 +                if let library = self.library {
@@ -735,7 +766,8 @@ index 0000000..c87196d
 +        offset += page.Items.count
 +        let known = Set(items.map(\.Id))
 +        items += page.Items.filter {
-+            guard !known.contains($0.Id), $0.IsFolder != true else { return false }
++            guard !known.contains($0.Id) else { return false }
++            if $0.IsFolder == true { return true }
 +            // Some servers hide paths. Keep those items so the download response can identify them.
 +            if $0.fileName.isEmpty { return true }
 +            let ext = ($0.fileName as NSString).pathExtension.lowercased()
@@ -749,7 +781,7 @@ index 0000000..c87196d
 +        loading = false
 +        refreshControl?.endRefreshing()
 +        tableView.reloadData()
-+        status(items.isEmpty && !hasMore ? (library == nil ? "No libraries are available to this account." : "No games found. Jellyfin must index your ROMs as library items; a server folder alone is not enough. Also check your search and account permissions.") : nil)
++        status(items.isEmpty && !hasMore ? (library == nil ? "No libraries are available to this account." : "No folders or games found. Jellyfin must index your ROMs as library items; a server folder alone is not enough. Also check your search and account permissions.") : nil)
 +    }
 +
 +    func updateSearchResults(for searchController: UISearchController) {
@@ -770,14 +802,15 @@ index 0000000..c87196d
 +        var content = cell.defaultContentConfiguration()
 +        cell.accessoryType = .none
 +        if indexPath.row == items.count {
-+            content.text = loading ? "Loading…" : "Load more"
++            content.text = loading ? "Loadingâ€¦" : "Load more"
 +        } else {
 +            let item = items[indexPath.row]
 +            content.text = item.Name
-+            content.secondaryText = library == nil ? "Browse library" : item.fileName
-+            content.image = covers.object(forKey: item.Id as NSString) ?? UIImage(systemName: library == nil ? "folder" : "gamecontroller")
++            let isFolder = library == nil || item.IsFolder == true
++            content.secondaryText = isFolder ? (library == nil ? "Browse library" : "Open folder") : item.fileName
++            content.image = covers.object(forKey: item.Id as NSString) ?? UIImage(systemName: isFolder ? "folder" : "gamecontroller")
 +            content.imageProperties.maximumSize = CGSize(width: 48, height: 60)
-+            cell.accessoryType = library == nil ? .disclosureIndicator : .none
++            cell.accessoryType = isFolder ? .disclosureIndicator : .none
 +            if item.ImageTags?["Primary"] != nil, covers.object(forKey: item.Id as NSString) == nil,
 +               coverTasks[item.Id] == nil, let client {
 +                coverTasks[item.Id] = Task { [weak self] in
@@ -817,11 +850,9 @@ index 0000000..c87196d
 +            return
 +        }
 +        let item = items[indexPath.row]
-+        if library == nil {
-+            library = item
-+            title = item.Name
-+            navigationItem.searchController = search
-+            reload()
++        if library == nil || item.IsFolder == true {
++            folderPath.append(item)
++            updateFolder()
 +        } else {
 +            download(item, client: client)
 +        }
@@ -953,10 +984,10 @@ index 0000000..c466058
 +)
 diff --git a/Tests/Jellyfin/JellyfinClientTests.swift b/Tests/Jellyfin/JellyfinClientTests.swift
 new file mode 100644
-index 0000000..9c807a2
+index 0000000..02a8f7a
 --- /dev/null
 +++ b/Tests/Jellyfin/JellyfinClientTests.swift
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,123 @@
 +// SPDX-License-Identifier: AGPL-3.0-or-later
 +import XCTest
 +@testable import ManicJellyfin
@@ -1010,11 +1041,30 @@ index 0000000..9c807a2
 +            XCTAssertEqual(query["userId"], "user")
 +            XCTAssertEqual(query["parentId"], "games")
 +            XCTAssertEqual(query["filters"], "IsNotFolder")
++            XCTAssertEqual(query["recursive"], "true")
 +            return (200, #"{"Items":[{"Id":"game","Name":"Mario","Path":"C:\\ROMs\\Mario.nds"}],"TotalRecordCount":101}"#)
 +        }
 +        let page = try await client().items(parentID: "games", start: 100, search: "Mario & Luigi")
 +        XCTAssertEqual(page.TotalRecordCount, 101)
 +        XCTAssertEqual(page.Items.first?.fileName, "Mario.nds")
++    }
++
++    func testBrowsePreservesFoldersAndScopesPagination() async throws {
++        StubProtocol.respond = { request in
++            let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
++            let query = Dictionary(uniqueKeysWithValues: parts.queryItems!.map { ($0.name, $0.value!) })
++            XCTAssertEqual(query["parentId"], "nes-folder")
++            XCTAssertEqual(query["startIndex"], "100")
++            XCTAssertEqual(query["recursive"], "false")
++            XCTAssertNil(query["filters"])
++            XCTAssertEqual(query["sortBy"], "IsFolder,SortName")
++            XCTAssertEqual(query["sortOrder"], "Descending,Ascending")
++            return (200, #"{"Items":[{"Id":"folder","Name":"NES","IsFolder":true},{"Id":"rom","Name":"Game","Path":"/roms/Game.nes","IsFolder":false}],"TotalRecordCount":102}"#)
++        }
++        let page = try await client().items(parentID: "nes-folder", start: 100, search: "  ")
++        XCTAssertEqual(page.Items.count, 2)
++        XCTAssertEqual(page.Items[0].IsFolder, true)
++        XCTAssertEqual(page.Items[1].fileName, "Game.nes")
 +    }
 +
 +    func testMissingOptionalMetadata() throws {
