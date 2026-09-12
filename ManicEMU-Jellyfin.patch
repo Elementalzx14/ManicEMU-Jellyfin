@@ -68,7 +68,7 @@ index 0000000..8261fc1
 +          if-no-files-found: ignore
 diff --git a/JELLYFIN.md b/JELLYFIN.md
 new file mode 100644
-index 0000000..536efbe
+index 0000000..f307f24
 --- /dev/null
 +++ b/JELLYFIN.md
 @@ -0,0 +1,55 @@
@@ -78,9 +78,9 @@ index 0000000..536efbe
 +
 +## Using it
 +
-+Open **Import → Add service → Game libraries → Jellyfin**. Enter your server's full URL (including a reverse-proxy base path if applicable), username, and password. Select the library containing your games. Search or browse covers, select a game, and keep the app open while it downloads. ManicEMU's existing importer then adds it to the local Games library, where you can launch it.
++Open **Import â†’ Add service â†’ Game libraries â†’ Jellyfin**. Enter your server's full URL (including a reverse-proxy base path if applicable), username, and password. Select the library containing your games. Search or browse covers, select a game, and keep the app open while it downloads. ManicEMU's existing importer then adds it to the local Games library, where you can launch it.
 +
-+The existing membership requirement for adding import services still applies. Reopen the same Jellyfin entry to return to the saved account. The first version supports one account at a time; use Sign Out to switch servers or users.
++The sideload build enables access to import services through the upstream SIDE_LOAD configuration. Reopen the same Jellyfin entry to return to the saved account. The first version supports one account at a time; use Sign Out to switch servers or users.
 +
 +Jellyfin must expose the ROMs as indexed items. Placing arbitrary ROM files in an ordinary Jellyfin media folder does not ensure Jellyfin indexes them. If the game library is empty, check that the games are visible as items in Jellyfin itself and accessible to this account. A game-library plugin may be necessary on the server. This client does not scan server disks or add server-side indexing.
 +
@@ -98,8 +98,8 @@ index 0000000..536efbe
 +
 +- This is source code, not a compiled or device-tested app. No connection to the user's server has been made.
 +- Windows checks: Swift syntax parsing, Xcode source-reference checks, plist parsing, and API-contract checks. These do not establish that the app compiles.
-+- Eight Swift client tests are included but have not been executed here; a macOS test runner is required.
-+- The GitHub Actions app build is an unexecuted build recipe. Upstream dependencies, LFS availability, SDK compatibility, or signing configuration may need fixes after its first run.
++- All eight Swift client tests passed on the GitHub-hosted macOS runner with Xcode 26.3.
++- The hosted app build is being validated. The pinned R.swift generator trust and an Xcode type-check timeout in the upstream cheat-code decoder have been addressed. No IPA has been produced yet.
 +- Games are downloaded before playing. There is no server-side game streaming, automatic launch, offline remote catalog, or Jellyfin save/progress synchronization.
 +- Artwork is displayed in the remote browser; this version does not overwrite local ManicEMU artwork.
 +- Multi-file games must be packaged in an archive containing all required files. A standalone CUE/M3U/GDI cannot fetch its companion files. JellyEmu-specific J3U and RomM pointer downloads are not implemented.
@@ -109,11 +109,11 @@ index 0000000..536efbe
 +
 +## Building without owning a Mac
 +
-+The included **Jellyfin checks and iOS build** workflow uses GitHub-hosted macOS. First apply these files to your own fork of ManicEMU at the base commit above, and commit them to its default branch. Under GitHub Actions, run the workflow with its default settings to execute the client tests. Then rerun with **Also attempt an unsigned iOS build** enabled.
++The public fork is https://github.com/Elementalzx14/ManicEMU-Jellyfin. Its **Build Jellyfin iOS IPA** workflow applies the root patch, runs the eight client tests, fetches emulator dependencies, and builds an unsigned iOS app on a GitHub-hosted Mac. Run it from the Actions tab.
 +
-+If successful, download the `ManicEMU-Jellyfin-unsigned` artifact. It still needs signing through your sideloading setup before an iPhone can install it. The workflow does not receive Apple credentials, sign the app, publish a release, or install anything. Review your account's Actions allowance before starting a hosted build.
++After a successful build, download the `ManicEMU-Jellyfin-unsigned` artifact and extract the IPA. Upload that IPA to Signulous to sign and install it. The workflow does not need Apple credentials.
 +
-+If the build fails, the workflow retains the Xcode build log for diagnosis. No hosted job has been started as part of this delivery.
++Failed builds retain the Xcode log for diagnosis.
 +
 +On a Mac, run `swift test` from the repository root to run the focused client tests. For the full app, fetch Git LFS content and recursive submodules, open the Xcode project, and build the `ManicEmuSideload` scheme. Use the upstream project requirements for its emulator dependencies.
 +
@@ -893,6 +893,44 @@ index 69e8b52..183def9 100644
                  }
              }
              
+diff --git a/ManicEmu/ManicEmu/Sources/Tools/Others/ARMaxDecrypt.swift b/ManicEmu/ManicEmu/Sources/Tools/Others/ARMaxDecrypt.swift
+index e1d18ac..7712fe0 100644
+--- a/ManicEmu/ManicEmu/Sources/Tools/Others/ARMaxDecrypt.swift
++++ b/ManicEmu/ManicEmu/Sources/Tools/Others/ARMaxDecrypt.swift
+@@ -193,17 +193,27 @@ enum ARMaxDecrypt {
+             i += 1
+             var tmp2 = val ^ seeds[i]
+             i += 1
+-            addr ^= table6[Int(tmp & 0x3F)] ^ table4[Int((tmp >> 8) & 0x3F)] ^ table2[Int((tmp >> 16) & 0x3F)] ^
+-                table0[Int((tmp >> 24) & 0x3F)] ^ table7[Int(tmp2 & 0x3F)] ^ table5[Int((tmp2 >> 8) & 0x3F)] ^
+-                table3[Int((tmp2 >> 16) & 0x3F)] ^ table1[Int((tmp2 >> 24) & 0x3F)]
++            addr ^= table6[Int(tmp & 0x3F)]
++            addr ^= table4[Int((tmp >> 8) & 0x3F)]
++            addr ^= table2[Int((tmp >> 16) & 0x3F)]
++            addr ^= table0[Int((tmp >> 24) & 0x3F)]
++            addr ^= table7[Int(tmp2 & 0x3F)]
++            addr ^= table5[Int((tmp2 >> 8) & 0x3F)]
++            addr ^= table3[Int((tmp2 >> 16) & 0x3F)]
++            addr ^= table1[Int((tmp2 >> 24) & 0x3F)]
+ 
+             tmp = rotr(addr, 4) ^ seeds[i]
+             i += 1
+             tmp2 = addr ^ seeds[i]
+             i += 1
+-            val ^= table6[Int(tmp & 0x3F)] ^ table4[Int((tmp >> 8) & 0x3F)] ^ table2[Int((tmp >> 16) & 0x3F)] ^
+-                table0[Int((tmp >> 24) & 0x3F)] ^ table7[Int(tmp2 & 0x3F)] ^ table5[Int((tmp2 >> 8) & 0x3F)] ^
+-                table3[Int((tmp2 >> 16) & 0x3F)] ^ table1[Int((tmp2 >> 24) & 0x3F)]
++            val ^= table6[Int(tmp & 0x3F)]
++            val ^= table4[Int((tmp >> 8) & 0x3F)]
++            val ^= table2[Int((tmp >> 16) & 0x3F)]
++            val ^= table0[Int((tmp >> 24) & 0x3F)]
++            val ^= table7[Int(tmp2 & 0x3F)]
++            val ^= table5[Int((tmp2 >> 8) & 0x3F)]
++            val ^= table3[Int((tmp2 >> 16) & 0x3F)]
++            val ^= table1[Int((tmp2 >> 24) & 0x3F)]
+         }
+         unscramble2(addr: &addr, val: &val)
+         setCode(&code, index, addr: val, val: addr)
 diff --git a/Package.swift b/Package.swift
 new file mode 100644
 index 0000000..c466058
